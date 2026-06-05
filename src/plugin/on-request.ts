@@ -2,6 +2,7 @@ import type { AuthContext } from "better-auth";
 import { computeFingerprint } from "./fingerprint";
 import { verifyJwt } from "./jwt";
 import { getRequestFingerprintInput } from "./request-context";
+import { loadSessionIntoContext } from "./session-bridge";
 import { extractTokenFromRequest } from "./token-extract";
 import type { ResolvedScjwtOptions, ScjwtJwtPayload } from "./types";
 import {
@@ -52,8 +53,7 @@ async function handleAuthenticatedRequest(
 		return fingerprintMismatch;
 	}
 
-	// Session load and context bridging wired in todo 20.
-	void payload;
+	return loadSessionIntoContext(context, payload);
 }
 
 async function verifyRequestToken(
