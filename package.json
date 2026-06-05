@@ -8,8 +8,28 @@
     "session-centric-jwt",
     "csjwt"
   ],
-  "module": "src/index.ts",
   "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    },
+    "./client": {
+      "types": "./dist/client.d.mts",
+      "import": "./dist/client.mjs"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "prepublishOnly": "bun run build"
+  },
   "author": "dark1zinn",
   "repository": {
     "type": "git",
@@ -20,12 +40,13 @@
   },
   "homepage": "https://github.com/dark1zinn/better-auth-scjwt#readme",
   "license": "MIT",
+  "peerDependencies": {
+    "better-auth": ">=1.0.0",
+    "jose": ">=5.0.0"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "tsdown": "^0.22.2",
     "typescript": "^6.0.3"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
   }
 }
