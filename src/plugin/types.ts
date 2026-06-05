@@ -51,9 +51,13 @@ export interface ResolvedScjwtOptions {
 }
 
 /**
- * Strict JWT payload contract (v1). No additional claims permitted.
+ * Strict JWT payload contract (v1). Required claims only; no additional properties.
  *
- * @see PLAN.md §2.1
+ * - `iss` — issuer URL from plugin options
+ * - `sub` — `user:{userId}` namespace-prefixed subject
+ * - `fp` — 64-char lowercase SHA-256 hex client fingerprint
+ * - `iat` / `exp` — issued-at and expiry as Unix epoch seconds
+ * - `sid` — database session row primary key
  */
 export interface ScjwtJwtPayload {
 	/** Token issuer — mirrors `options.issuer`. */

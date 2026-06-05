@@ -42,10 +42,11 @@
   "license": "MIT",
   "peerDependencies": {
     "better-auth": ">=1.0.0",
-    "jose": ">=5.0.0"
+    "jose": "^5.0.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "jose": "^5.0.0",
     "tsdown": "^0.22.2",
     "typescript": "^6.0.3"
   }
