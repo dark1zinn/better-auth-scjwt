@@ -3,10 +3,12 @@ import {
 	getSessionFromCtx,
 	isAPIError,
 } from "better-auth/api";
+import { stripBetterAuthCookiesFromHeaders } from "./cookie-strip";
 import { computeFingerprint } from "./fingerprint";
 import { setIssuanceToken } from "./issuance-state";
 import { signJwtFromParts } from "./jwt";
 import { getRequestFingerprintInput } from "./request-context";
+import { applyTokenToHeaders } from "./token-deliver";
 import type { ResolvedScjwtOptions } from "./types";
 
 export interface HookMatchContext {
@@ -29,7 +31,7 @@ export function sessionIssuanceMatcher(context: HookMatchContext): boolean {
 }
 
 /**
- * After-hooks for session JWT issuance (delivery wired in todo 17).
+ * After-hooks for session JWT issuance on successful sign-in / sign-up.
  */
 export function createIssuanceAfterHooks(options: ResolvedScjwtOptions): {
 	after: {
@@ -78,6 +80,19 @@ function createIssuanceHandler(
 		});
 
 		setIssuanceToken(ctx.context as Record<string, unknown>, token);
+
+		ctx.context.responseHeaders ??= new Headers();
+		stripBetterAuthCookiesFromHeaders(
+			ctx.context.responseHeaders,
+			ctx.context.authCookies,
+		);
+		applyTokenToHeaders(ctx.context.responseHeaders, {
+			token,
+			tokenPlacement: options.tokenPlacement,
+			expiresInSeconds: options.expiresInSeconds,
+			cookieName: options.cookieName,
+			createAuthCookie: ctx.context.createAuthCookie,
+		});
 
 		return { context: ctx };
 	});
