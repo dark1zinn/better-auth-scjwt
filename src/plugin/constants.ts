@@ -1,4 +1,4 @@
-import type { TokenPlacement } from "./types.ts";
+import type { TokenPlacement } from "./types";
 
 export const PLUGIN_ID = "scjwt" as const;
 
