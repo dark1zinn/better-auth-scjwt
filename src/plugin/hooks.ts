@@ -1,4 +1,12 @@
-import { createAuthMiddleware } from "better-auth/api";
+import {
+	createAuthMiddleware,
+	getSessionFromCtx,
+	isAPIError,
+} from "better-auth/api";
+import { computeFingerprint } from "./fingerprint";
+import { setIssuanceToken } from "./issuance-state";
+import { signJwtFromParts } from "./jwt";
+import { getRequestFingerprintInput } from "./request-context";
 import type { ResolvedScjwtOptions } from "./types";
 
 export interface HookMatchContext {
@@ -21,9 +29,9 @@ export function sessionIssuanceMatcher(context: HookMatchContext): boolean {
 }
 
 /**
- * After-hooks scaffold for session JWT issuance (handler wired in todos 16–17).
+ * After-hooks for session JWT issuance (delivery wired in todo 17).
  */
-export function createIssuanceAfterHooks(_options: ResolvedScjwtOptions): {
+export function createIssuanceAfterHooks(options: ResolvedScjwtOptions): {
 	after: {
 		matcher: typeof sessionIssuanceMatcher;
 		handler: ReturnType<typeof createAuthMiddleware>;
@@ -33,14 +41,44 @@ export function createIssuanceAfterHooks(_options: ResolvedScjwtOptions): {
 		after: [
 			{
 				matcher: sessionIssuanceMatcher,
-				handler: createIssuanceHandler(),
+				handler: createIssuanceHandler(options),
 			},
 		],
 	};
 }
 
-function createIssuanceHandler(): ReturnType<typeof createAuthMiddleware> {
+function createIssuanceHandler(
+	options: ResolvedScjwtOptions,
+): ReturnType<typeof createAuthMiddleware> {
 	return createAuthMiddleware(async (ctx) => {
+		if (isAPIError(ctx.context.returned)) {
+			return { context: ctx };
+		}
+
+		const sessionResult = await getSessionFromCtx(ctx);
+		const session = sessionResult?.session;
+		if (!session?.id || !session.userId) {
+			return { context: ctx };
+		}
+
+		const headers = ctx.headers ?? new Headers();
+		const { ip, ua, platform } = getRequestFingerprintInput(
+			headers,
+			ctx.context.options,
+		);
+		const fingerprint = computeFingerprint(ip, ua, platform);
+
+		const token = await signJwtFromParts({
+			jwtSecret: options.jwtSecret,
+			issuer: options.issuer,
+			userId: session.userId,
+			fingerprint,
+			sessionId: session.id,
+			expiresInSeconds: options.expiresInSeconds,
+		});
+
+		setIssuanceToken(ctx.context as Record<string, unknown>, token);
+
 		return { context: ctx };
 	});
 }
