@@ -60,11 +60,10 @@ async function handleAuthenticatedRequest(
 		return sessionError;
 	}
 
-	await handleSlidingSessionRefresh(request, context, options, payload);
+	await handleSlidingSessionRefresh(context, options, payload);
 }
 
 async function handleSlidingSessionRefresh(
-	request: Request,
 	context: AuthContext,
 	options: ResolvedScjwtOptions,
 	payload: ScjwtJwtPayload,
@@ -91,7 +90,7 @@ async function handleSlidingSessionRefresh(
 		(nowSeconds + options.expiresInSeconds) * 1000,
 	);
 
-	setPendingRefresh(request, {
+	setPendingRefresh(context as Record<string, unknown>, {
 		token: refreshedToken,
 		placement: options.tokenPlacement,
 	});

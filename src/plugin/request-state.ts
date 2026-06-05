@@ -1,29 +1,33 @@
 import type { PendingRefresh } from "./types";
 
-const pendingRefreshes = new WeakMap<Request, PendingRefresh>();
+const PENDING_REFRESH_KEY = "scjwtPendingRefresh";
 
 export function setPendingRefresh(
-	request: Request,
+	context: Record<string, unknown>,
 	refresh: PendingRefresh,
 ): void {
-	pendingRefreshes.set(request, refresh);
+	context[PENDING_REFRESH_KEY] = refresh;
 }
 
-export function getPendingRefresh(request: Request): PendingRefresh | undefined {
-	return pendingRefreshes.get(request);
+export function getPendingRefresh(
+	context: Record<string, unknown>,
+): PendingRefresh | undefined {
+	return context[PENDING_REFRESH_KEY] as PendingRefresh | undefined;
 }
 
-export function clearPendingRefresh(request: Request): void {
-	pendingRefreshes.delete(request);
+export function clearPendingRefresh(context: Record<string, unknown>): void {
+	delete context[PENDING_REFRESH_KEY];
 }
 
 /**
- * Returns a pending refresh and removes it from the request-scoped store.
+ * Returns a pending refresh and removes it from the auth context.
  */
-export function takePendingRefresh(request: Request): PendingRefresh | undefined {
-	const refresh = pendingRefreshes.get(request);
+export function takePendingRefresh(
+	context: Record<string, unknown>,
+): PendingRefresh | undefined {
+	const refresh = getPendingRefresh(context);
 	if (refresh) {
-		pendingRefreshes.delete(request);
+		clearPendingRefresh(context);
 	}
 	return refresh;
 }

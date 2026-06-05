@@ -2,6 +2,7 @@ import type { BetterAuthPlugin } from "better-auth";
 import { PLUGIN_ID } from "./constants";
 import { createIssuanceAfterHooks } from "./hooks";
 import { createOnRequest } from "./on-request";
+import { createOnResponse } from "./on-response";
 import { resolveOptions } from "./resolve-options";
 import type { ResolvedScjwtOptions, ScjwtOptions } from "./types";
 
@@ -15,5 +16,6 @@ function createPlugin(options: ResolvedScjwtOptions): BetterAuthPlugin {
 		id: PLUGIN_ID,
 		hooks: createIssuanceAfterHooks(options),
 		onRequest: createOnRequest(options),
+		onResponse: createOnResponse(options),
 	} satisfies BetterAuthPlugin;
 }
