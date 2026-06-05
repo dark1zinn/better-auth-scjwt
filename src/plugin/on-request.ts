@@ -1,11 +1,18 @@
 import type { AuthContext } from "better-auth";
+import { computeFingerprint } from "./fingerprint";
+import { verifyJwt } from "./jwt";
+import { getRequestFingerprintInput } from "./request-context";
 import { extractTokenFromRequest } from "./token-extract";
-import type { ResolvedScjwtOptions } from "./types";
+import type { ResolvedScjwtOptions, ScjwtJwtPayload } from "./types";
+import {
+	interruptWithUnauthorized,
+	type OnRequestInterrupt,
+} from "./unauthorized-response";
 
 export type OnRequestHandler = (
 	request: Request,
 	context: AuthContext,
-) => Promise<void>;
+) => Promise<OnRequestInterrupt | void>;
 
 /**
  * Gateway guard entry point. Falls through when no SCJWT is present.
@@ -21,7 +28,7 @@ export function createOnRequest(options: ResolvedScjwtOptions): OnRequestHandler
 			return;
 		}
 
-		await handleAuthenticatedRequest(request, context, options, token);
+		return handleAuthenticatedRequest(request, context, options, token);
 	};
 }
 
@@ -30,9 +37,61 @@ async function handleAuthenticatedRequest(
 	context: AuthContext,
 	options: ResolvedScjwtOptions,
 	token: string,
-): Promise<void> {
-	void request;
-	void context;
-	void options;
-	void token;
+): Promise<OnRequestInterrupt | void> {
+	const payload = await verifyRequestToken(token, options);
+	if (!payload) {
+		return interruptWithUnauthorized("Invalid or expired session token.");
+	}
+
+	const fingerprintMismatch = await handleFingerprintCheck(
+		request,
+		context,
+		payload,
+	);
+	if (fingerprintMismatch) {
+		return fingerprintMismatch;
+	}
+
+	// Session load and context bridging wired in todo 20.
+	void payload;
+}
+
+async function verifyRequestToken(
+	token: string,
+	options: ResolvedScjwtOptions,
+): Promise<ScjwtJwtPayload | null> {
+	try {
+		return await verifyJwt({
+			token,
+			jwtSecret: options.jwtSecret,
+			issuer: options.issuer,
+		});
+	} catch {
+		return null;
+	}
+}
+
+async function handleFingerprintCheck(
+	request: Request,
+	context: AuthContext,
+	payload: ScjwtJwtPayload,
+): Promise<OnRequestInterrupt | void> {
+	const { ip, ua, platform } = getRequestFingerprintInput(
+		request.headers,
+		context.options,
+	);
+	const currentFingerprint = computeFingerprint(ip, ua, platform);
+
+	if (currentFingerprint === payload.fp) {
+		return;
+	}
+
+	await context.adapter.delete({
+		model: "session",
+		where: [{ field: "id", value: payload.sid }],
+	});
+
+	return interruptWithUnauthorized(
+		"Machine fingerprint mismatch. Session revoked.",
+	);
 }
