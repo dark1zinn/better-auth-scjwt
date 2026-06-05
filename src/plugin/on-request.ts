@@ -2,6 +2,8 @@ import type { AuthContext } from "better-auth";
 import { computeFingerprint } from "./fingerprint";
 import { verifyJwt } from "./jwt";
 import { getRequestFingerprintInput } from "./request-context";
+import { setPendingRefresh } from "./request-state";
+import { refreshSlidingSession } from "./sliding-session";
 import { loadSessionIntoContext } from "./session-bridge";
 import { extractTokenFromRequest } from "./token-extract";
 import type { ResolvedScjwtOptions, ScjwtJwtPayload } from "./types";
@@ -53,7 +55,46 @@ async function handleAuthenticatedRequest(
 		return fingerprintMismatch;
 	}
 
-	return loadSessionIntoContext(context, payload);
+	const sessionError = await loadSessionIntoContext(context, payload);
+	if (sessionError) {
+		return sessionError;
+	}
+
+	await handleSlidingSessionRefresh(request, context, options, payload);
+}
+
+async function handleSlidingSessionRefresh(
+	request: Request,
+	context: AuthContext,
+	options: ResolvedScjwtOptions,
+	payload: ScjwtJwtPayload,
+): Promise<void> {
+	const activeSession = context.session;
+	if (!activeSession) {
+		return;
+	}
+
+	const refreshedToken = await refreshSlidingSession({
+		adapter: context.adapter,
+		options,
+		payload,
+		userId: activeSession.session.userId,
+		fingerprint: payload.fp,
+	});
+
+	if (!refreshedToken) {
+		return;
+	}
+
+	const nowSeconds = Math.floor(Date.now() / 1000);
+	activeSession.session.expiresAt = new Date(
+		(nowSeconds + options.expiresInSeconds) * 1000,
+	);
+
+	setPendingRefresh(request, {
+		token: refreshedToken,
+		placement: options.tokenPlacement,
+	});
 }
 
 async function verifyRequestToken(
