@@ -34,6 +34,12 @@ export const auth = betterAuth({
 });
 ```
 
+A Better Auth `database` adapter is required. SCJWT stores the canonical session state in the database, so stateless/no-database setups are not supported and fail fast with:
+
+```txt
+[scjwt] database adapter is required; stateless mode is not supported.
+```
+
 After a successful `/sign-in/*` or `/sign-up/*` flow, the plugin:
 
 1. Signs an HS256 JWT bound to the new session row
