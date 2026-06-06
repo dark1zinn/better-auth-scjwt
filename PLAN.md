@@ -1,6 +1,8 @@
-# Comprehensive Technical Specification: better-auth-csjwt
+# Comprehensive Technical Specification: better-auth-scjwt
 
-This document defines the architectural blueprint, structural constraints, and implementation mechanics for a custom plugin compatible with the `better-auth` ecosystem. This plugin implements a high-security, state-backed, device-fingerprinted hybrid authentication pattern named **Session-Centric JWT (CSJWT)**.
+This document defines the architectural blueprint, structural constraints, and implementation mechanics for a custom plugin compatible with the `better-auth` ecosystem. This plugin implements a high-security, state-backed, device-fingerprinted hybrid authentication pattern named **Session-Centric JWT (SCJWT / CSJWT)**.
+
+**Package:** `better-auth-scjwt` — published from `dist/` built with [tsdown](https://tsdown.dev) (`bun run build`). Entry points: `better-auth-scjwt` (server) and `better-auth-scjwt/client` (client plugin).
 
 ---
 
@@ -80,34 +82,61 @@ The plugin must expose a clean, strongly typed factory function adhering to the 
 ```ts
 import { BetterAuthPlugin } from "better-auth";
 
-export interface CentricJwtOptions {
+export interface ScjwtOptions {
   /**
    * Cryptographic key used to sign and verify HS256 JWT tokens.
    */
   jwtSecret: string;
   /**
-   * The explicit string asserting authority over token issuance (e.g., '[https://api.domain.com](https://api.domain.com)').
+   * The explicit string asserting authority over token issuance (e.g., 'https://api.domain.com').
    */
   issuer: string;
   /**
-   * Window of structural validity for the cryptographic envelope in seconds. Defaults to 3600.
+   * Window of structural validity for the cryptographic envelope in seconds.
+   * @default 3600
    */
   expiresInSeconds?: number;
   /**
-   * String identifier mapping the HTTP-Only cookie key name. Defaults to 'centric_session_jwt'.
+   * HTTP-only cookie name when `tokenPlacement` is `"cookie"`.
+   * @default "auth-token"
    */
   cookieName?: string;
   /**
-   * Dictates the network boundary strategy utilized for transport execution.
-   * 'cookie' -> Enforces HTTP-Only, Secure, SameSite=Lax headers.
-   * 'header' -> Appends to Authorization headers and exposes CORS validation vectors.
+   * Transport strategy for the session JWT.
+   * - `"cookie"` — HTTP-only, Secure, SameSite=Lax via Better Auth `createAuthCookie`
+   * - `"header"` — `set-auth-token` response header; clients send `Authorization: Bearer <JWT>`
    * @default "cookie"
    */
   tokenPlacement?: "cookie" | "header";
+  /**
+   * When enabled, actively used sessions receive an automatic JWT re-sign before expiry.
+   * Refresh runs when remaining lifetime is at or below 20% of `expiresInSeconds`.
+   * @default false
+   */
+  slidingSession?: boolean;
 }
 
-export declare const centricJwtSession: (options: CentricJwtOptions) => BetterAuthPlugin;
+export declare const scjwt: (options: ScjwtOptions) => BetterAuthPlugin;
 ```
+
+Client plugin (type inference only; no client-side refresh logic):
+
+```ts
+import { scjwtClient } from "better-auth-scjwt/client";
+
+// pairs with server scjwt() via $InferServerPlugin
+scjwtClient();
+```
+
+### 3.2 Sliding session (opt-in)
+
+Sliding refresh is **disabled by default** (`slidingSession: false`). When enabled:
+
+1. During `onRequest`, if remaining JWT lifetime ≤ `floor(expiresInSeconds × 0.2)`, extend the database session `expiresAt` and re-sign the JWT.
+2. Queue the new token on the auth context during `onRequest`.
+3. Deliver the new token in `onResponse` via the configured `tokenPlacement`.
+
+Native Better Auth `session.updateAge` refresh does not propagate to SCJWT clients. When using `slidingSession: true`, recommend `session.disableSessionRefresh: true` on the host `betterAuth()` config to avoid conflicting refresh behavior.
 
 ## 4. Lifecycle Hook Mechanics & Execution Pipeline
 
@@ -139,8 +168,8 @@ Strip Default Opaque Better-Auth Cookies (Set-Cookie: clear)
 ┌─────────────────────────┴─────────────────────────┐
 │ tokenPlacement === "cookie"                       │ tokenPlacement === "header"
 ▼                                                   ▼
-Append HTTP-Only Cookie Header                      Set 'Authorization: Bearer <JWT>'
-Max-Age, Secure, SameSite=Lax                       Expose Headers via CORS Policy
+Append HTTP-Only Cookie Header                      Set `set-auth-token` response header
+Max-Age, Secure, SameSite=Lax                       (CORS expose-headers: future patch)
 └─────────────────────────┬─────────────────────────┘
          │
          ▼
@@ -202,15 +231,40 @@ Query Storage: adapter.findOne("session", where id == payload.sid)
 Map Context: Assign database session record to context.session object
          │
          ▼
-[Exit Interceptor: Request Cleared to Continue Seamless Downstream Pipeline]
+slidingSession enabled and remaining lifetime ≤ 20% threshold?
+         │
+       ├───[ No ]───> [Exit onRequest]
+         │
+       [ Yes ]
+         │
+         ▼
+Extend DB session expiresAt, re-sign JWT, queue token on auth context
+         │
+         ▼
+[Exit onRequest: Request Cleared to Continue Downstream Pipeline]
 ```
+
+### 4.3 Token re-delivery (`onResponse`)
+
+When a sliding refresh was queued during `onRequest`, `onResponse` delivers the new JWT (cookie or `set-auth-token` header) and clears the pending entry from the auth context.
 
 ## 5. Security Fail-Safes & Edge Cases
 
 An implementing engine or agent must explicitly verify and test code logic compliance against the following edge cases:
 
-- **Header Stripping Proximity:** When operating in `cookie` placement mode, any pre-existing cookie strings injected by the base layers of `better-auth` must be parsed out and completely omitted from output headers during execution tracking hooks. This forces clients to carry only the highly secure `centric_session_jwt` token.
+- **Header Stripping Proximity:** When operating in `cookie` placement mode, any pre-existing cookie strings injected by the base layers of `better-auth` must be parsed out and completely omitted from output headers during execution tracking hooks. This forces clients to carry only the SCJWT cookie (default name: `auth-token`).
     
 - **Context Resolution Bridging:** Setting `context.session = dbSession` during the pipeline sequence ensures compatibility with other native plugins or core application APIs (like calling `auth.api.getSession()`). This mapping prevents downstream plugins from failing due to empty context assumptions.
     
 - **Graceful Failure Fall-Through:** If the extraction phase returns no tokens from headers or cookies, the pipeline must exit smoothly using a clear return statement without throwing errors. This allows non-authenticated public routes (e.g., viewing public documentation or pricing pages) to render correctly.
+
+## 6. Build & publish
+
+The npm package is built with **tsdown** (not `tsc` or `bun build`):
+
+- **Entries:** `src/index.ts` (server exports), `src/client.ts` (client plugin)
+- **Output:** `dist/*.mjs`, `dist/*.d.mts`
+- **Externals:** `better-auth`, `better-auth/client`, `jose` (peer dependencies, never bundled)
+- **Scripts:** `bun run build` (tsdown), `prepublishOnly` runs build before publish
+
+Tests live in `test/` at the project root (`bun test`). Integration tests may use Better Auth [test-utils](https://better-auth.com/docs/plugins/test-utils) via a test-only auth instance.
