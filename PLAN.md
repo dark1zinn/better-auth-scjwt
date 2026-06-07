@@ -13,7 +13,7 @@ Standard JWT solutions delegate the ultimate source of truth directly to a state
 The `better-auth-csjwt` plugin overrides this behavior by combining the portability of a signed JSON Web Token with the absolute, deterministic state tracking of a database session repository.
 
 ### 1.1 Core Invariants
-* **Database as the Sole Source of Truth:** The JWT is strictly an un-queryable, tamper-proof pointer to an explicit database primary key row (`session.id`).
+* **Database as the Sole Source of Truth:** The JWT is strictly an un-queryable, tamper-proof pointer to an explicit database primary key row (`session.id`). A database adapter is therefore **mandatory**: the plugin fails fast at initialization (`[scjwt] database adapter is required; stateless mode is not supported.`) when Better Auth is configured without a `database`.
 * **Cryptographic Device Binding:** Every issued token embeds a physical deterministic hardware signature ($fp$). If a request contains a valid signature but exhibits a fingerprint mismatch, the token is flagged as compromised.
 * **Instant, Aggressive Poisoning (Fail-Closed):** Upon fingerprint mismatch detection, the plugin triggers an immediate side-effect: the referenced database session is deleted instantly, and the current request execution pipeline terminates with a `419` or `401 Unauthorized` state.
 
