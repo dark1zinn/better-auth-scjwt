@@ -1,17 +1,30 @@
 import { describe, expect, test } from "bun:test";
+import { betterAuth } from "better-auth";
+import { memoryAdapter } from "better-auth/adapters/memory";
 import {
 	DEFAULT_COOKIE_NAME,
 	DEFAULT_EXPIRES_IN_SECONDS,
 	DEFAULT_SLIDING_SESSION,
 	DEFAULT_TOKEN_PLACEMENT,
 } from "../src/plugin/constants";
-import { resolveOptions } from "../src/plugin/resolve-options";
+import { scjwt } from "../src/plugin/index";
+import {
+	DATABASE_REQUIRED_ERROR,
+	assertDatabaseConfigured,
+	resolveOptions,
+} from "../src/plugin/resolve-options";
 import type { ScjwtOptions } from "../src/plugin/types";
+import { TEST_ISSUER, TEST_JWT_SECRET } from "./helpers/fixtures";
 
 const validOptions: ScjwtOptions = {
 	jwtSecret: "test-secret",
 	issuer: "https://api.example.com",
 };
+
+const scjwtPlugin = scjwt({
+	jwtSecret: TEST_JWT_SECRET,
+	issuer: TEST_ISSUER,
+});
 
 describe("resolveOptions", () => {
 	test("applies defaults for optional fields", () => {
@@ -97,5 +110,34 @@ describe("resolveOptions", () => {
 		).toThrow(
 			'[scjwt] tokenPlacement must be "cookie" or "header", received "query".',
 		);
+	});
+
+	test("fails fast when Better Auth is configured without a database", async () => {
+		const auth = betterAuth({
+			secret: "test-auth-secret",
+			baseURL: TEST_ISSUER,
+			plugins: [scjwtPlugin],
+		});
+
+		await expect(auth.$context).rejects.toThrow(DATABASE_REQUIRED_ERROR);
+	});
+
+	test("accepts an explicit database adapter", async () => {
+		const auth = betterAuth({
+			database: memoryAdapter({}),
+			secret: "test-auth-secret",
+			baseURL: TEST_ISSUER,
+			plugins: [scjwtPlugin],
+		});
+
+		await expect(auth.$context).resolves.toBeDefined();
+	});
+
+	test("detects missing database configuration from auth context", () => {
+		expect(() =>
+			assertDatabaseConfigured({ options: {} } as Parameters<
+				typeof assertDatabaseConfigured
+			>[0]),
+		).toThrow(DATABASE_REQUIRED_ERROR);
 	});
 });
