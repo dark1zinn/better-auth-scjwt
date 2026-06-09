@@ -24,6 +24,10 @@ Pure "stateless JWTs" have a major flaw: inability to be revoked. If a token is 
 
 For a visual breakdown of how stateless (pure JWT) and stateful (session) authentications differ in their routing and flow: https://www.youtube.com/watch?v=fyTxwIa-1U0
 
+## Revoke path audit
+
+Better Auth session revocation vs SCJWT invalidation: [REVOKE_AUDIT.md](./REVOKE_AUDIT.md)
+
 ## Learn more
 
 - [Why pure JWTs are dangerous and how to pair it with sessions for security](https://redis.io/blog/json-web-tokens-jwt-are-dangerous-for-user-sessions/)
