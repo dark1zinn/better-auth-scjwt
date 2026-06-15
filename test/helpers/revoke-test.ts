@@ -8,12 +8,17 @@ import { DEFAULT_COOKIE_NAME } from "../../src/plugin/constants";
 import { computeFingerprint } from "../../src/plugin/fingerprint";
 import { signJwtFromParts } from "../../src/plugin/jwt";
 import {
+	isClearingSetCookie,
+	SET_AUTH_TOKEN_HEADER,
+} from "../../src/plugin/token-deliver";
+import {
 	createOnRequest,
 	type OnRequestHandler,
 } from "../../src/plugin/on-request";
 import { getRequestFingerprintInput } from "../../src/plugin/request-context";
 import { resolveOptions } from "../../src/plugin/resolve-options";
 import type { OnRequestInterrupt } from "../../src/plugin/unauthorized-response";
+import type { TokenPlacement } from "../../src/plugin/types";
 import { scjwt } from "../../src/plugin/index";
 import { getTestContext } from "./auth-test";
 import {
@@ -33,6 +38,18 @@ export const revokeTestOptions = resolveOptions({
 });
 
 export function createRevokeTestAuth(memoryDB: MemoryDB = {}) {
+	return createClearTestAuth(memoryDB);
+}
+
+export interface ClearTestAuthOptions {
+	tokenPlacement?: TokenPlacement;
+	cookieName?: string;
+}
+
+export function createClearTestAuth(
+	memoryDB: MemoryDB = {},
+	options: ClearTestAuthOptions = {},
+) {
 	return betterAuth({
 		database: memoryAdapter(memoryDB),
 		secret: "test-auth-secret",
@@ -43,9 +60,58 @@ export function createRevokeTestAuth(memoryDB: MemoryDB = {}) {
 			scjwt({
 				jwtSecret: TEST_JWT_SECRET,
 				issuer: TEST_ISSUER,
+				tokenPlacement: options.tokenPlacement,
+				cookieName: options.cookieName,
 			}),
 		],
 	});
+}
+
+export function getSetCookieValues(headers: Headers): string[] {
+	if (typeof headers.getSetCookie === "function") {
+		return headers.getSetCookie();
+	}
+
+	const combined = headers.get("set-cookie");
+	if (!combined) {
+		return [];
+	}
+
+	return combined.split(/,(?=\s*[^;=]+=)/);
+}
+
+export function expectScjwtCookieCleared(
+	headers: Headers,
+	cookieName = DEFAULT_COOKIE_NAME,
+): void {
+	const setCookies = getSetCookieValues(headers);
+	const clearing = setCookies.filter((setCookie) =>
+		isClearingSetCookie(setCookie, cookieName),
+	);
+	expect(clearing.length).toBeGreaterThan(0);
+}
+
+export function expectScjwtCookieNotCleared(
+	headers: Headers,
+	cookieName = DEFAULT_COOKIE_NAME,
+): void {
+	const setCookies = getSetCookieValues(headers);
+	const clearing = setCookies.filter((setCookie) =>
+		isClearingSetCookie(setCookie, cookieName),
+	);
+	expect(clearing).toHaveLength(0);
+}
+
+export function expectScjwtHeaderCleared(headers: Headers): void {
+	expect(headers.has(SET_AUTH_TOKEN_HEADER)).toBe(false);
+}
+
+export async function getScjwtCookieName(
+	auth: ReturnType<typeof createClearTestAuth>,
+	cookieName = DEFAULT_COOKIE_NAME,
+): Promise<string> {
+	const ctx = await auth.$context;
+	return ctx.createAuthCookie(cookieName, { maxAge: 0 }).name;
 }
 
 export async function seedCredentialUser(
