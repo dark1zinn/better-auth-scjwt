@@ -1,4 +1,5 @@
 import type { AuthContext, Session, User } from "better-auth";
+import { isPastEffectiveExpiry } from "./effective-expiry";
 import type { ScjwtJwtPayload } from "./types";
 import {
 	interruptWithUnauthorized,
@@ -21,7 +22,7 @@ export async function loadSessionIntoContext(
 		return interruptWithUnauthorized("Session not found.");
 	}
 
-	if (isSessionExpired(session.expiresAt)) {
+	if (isPastEffectiveExpiry(payload.exp, session.expiresAt)) {
 		return interruptWithUnauthorized("Session has expired.");
 	}
 
@@ -40,13 +41,4 @@ export async function loadSessionIntoContext(
 	}
 
 	context.session = { session, user };
-}
-
-function isSessionExpired(expiresAt: Session["expiresAt"]): boolean {
-	const expiresAtMs =
-		expiresAt instanceof Date
-			? expiresAt.getTime()
-			: new Date(expiresAt).getTime();
-
-	return Number.isNaN(expiresAtMs) || expiresAtMs <= Date.now();
 }

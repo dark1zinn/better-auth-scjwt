@@ -159,6 +159,9 @@ Compute Fingerprint (IP + User-Agent + Platform)
 Calculate SHA-256 Hex Hash (fp)
          │
          ▼
+Cap JWT TTL to min(options.expiresInSeconds, session.expiresAt − now)
+         │
+         ▼
 Sign JWT (HS256) via jose Framework
          │
          ▼
@@ -225,7 +228,12 @@ Does currentFpHash === payload.fp?
          ▼
 Query Storage: adapter.findOne("session", where id == payload.sid)
          │
-         ├─► [Row Missing / Session Dead] ───► Throw APIError("UNAUTHORIZED")
+         ├─► [Row Missing] ───► Throw APIError("UNAUTHORIZED")
+         │
+         ▼
+Effective expiry = min(payload.exp, session.expiresAt). Past now?
+         │
+         ├─► [Yes: Session Dead] ───► Throw APIError("UNAUTHORIZED", "Session has expired.")
          │
          ▼
 Map Context: Assign database session record to context.session object
