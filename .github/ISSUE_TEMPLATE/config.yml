@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: better-auth-scjwt README
+    url: https://github.com/dark1zinn/better-auth-scjwt#readme
+    about: Installation, options, and security model
