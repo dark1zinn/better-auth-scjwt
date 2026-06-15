@@ -122,6 +122,7 @@ Strict v1 payload (no extra claims):
 
 ## Security model
 
+- **Effective expiry** — Session validity uses `min(JWT exp, database expiresAt)`. At issuance, JWT lifetime is capped to the session row's `expiresAt`; at validation, `loadSessionIntoContext` rejects when past effective expiry (`"Session has expired."`).
 - **Database as source of truth** — Revoking or deleting the session row invalidates the JWT immediately on the next gateway request (`401`, `"Session not found."`). SCJWT does not maintain a separate revocation list.
 - **Revocation via Better Auth** — When Better Auth deletes the session row, SCJWT is dead. Verified core paths (Better Auth v1.6.14): `signOut`, `revokeSession`, `revokeOtherSessions`, and `changePassword` with `revokeOtherSessions: true`. Full audit: [`docs/REVOKE_AUDIT.md`](./docs/REVOKE_AUDIT.md).
 - **Host configuration matters** — `changePassword` does **not** delete session rows by default; other devices keep valid SCJWTs until `exp` unless you pass `revokeOtherSessions: true`. For password reset, enable `emailAndPassword.revokeSessionsOnPasswordReset` if all sessions should end.

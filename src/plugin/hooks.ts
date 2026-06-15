@@ -4,6 +4,7 @@ import {
 	isAPIError,
 } from "better-auth/api";
 import { stripBetterAuthCookiesFromHeaders } from "./cookie-strip";
+import { computeJwtExpiresInSeconds } from "./effective-expiry";
 import { computeFingerprint } from "./fingerprint";
 import { setIssuanceToken } from "./issuance-state";
 import { signJwtFromParts } from "./jwt";
@@ -70,13 +71,25 @@ function createIssuanceHandler(
 		);
 		const fingerprint = computeFingerprint(ip, ua, platform);
 
+		const issuedAt = Math.floor(Date.now() / 1000);
+		const expiresInSeconds = computeJwtExpiresInSeconds(
+			issuedAt,
+			options.expiresInSeconds,
+			session.expiresAt,
+		);
+
+		if (expiresInSeconds <= 0) {
+			return { context: ctx };
+		}
+
 		const token = await signJwtFromParts({
 			jwtSecret: options.jwtSecret,
 			issuer: options.issuer,
 			userId: session.userId,
 			fingerprint,
 			sessionId: session.id,
-			expiresInSeconds: options.expiresInSeconds,
+			expiresInSeconds,
+			issuedAt,
 		});
 
 		setIssuanceToken(ctx.context as Record<string, unknown>, token);
@@ -89,7 +102,7 @@ function createIssuanceHandler(
 		applyTokenToHeaders(ctx.context.responseHeaders, {
 			token,
 			tokenPlacement: options.tokenPlacement,
-			expiresInSeconds: options.expiresInSeconds,
+			expiresInSeconds,
 			cookieName: options.cookieName,
 			createAuthCookie: ctx.context.createAuthCookie,
 		});
