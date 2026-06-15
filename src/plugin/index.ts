@@ -3,6 +3,7 @@ import { PLUGIN_ID } from "./constants";
 import { createIssuanceAfterHooks } from "./hooks";
 import { createOnRequest } from "./on-request";
 import { createOnResponse } from "./on-response";
+import { createRevokeClearAfterHooks } from "./revoke-hooks";
 import { createDatabaseRequiredInit, resolveOptions } from "./resolve-options";
 import type { ResolvedScjwtOptions, ScjwtOptions } from "./types";
 
@@ -15,7 +16,12 @@ function createPlugin(options: ResolvedScjwtOptions): BetterAuthPlugin {
 	return {
 		id: PLUGIN_ID,
 		init: createDatabaseRequiredInit(),
-		hooks: createIssuanceAfterHooks(options),
+		hooks: {
+			after: [
+				...createIssuanceAfterHooks(options).after,
+				...createRevokeClearAfterHooks(options).after,
+			],
+		},
 		onRequest: createOnRequest(options),
 		onResponse: createOnResponse(options),
 	} satisfies BetterAuthPlugin;

@@ -15,6 +15,12 @@ export interface DeliverTokenParams {
 	createAuthCookie: CreateAuthCookie;
 }
 
+export interface ClearTokenParams {
+	tokenPlacement: TokenPlacement;
+	cookieName: string;
+	createAuthCookie: CreateAuthCookie;
+}
+
 /**
  * Resolves cookie name/attributes via Better Auth's `createAuthCookie` helper.
  */
@@ -48,6 +54,53 @@ export function applyTokenToHeaders(
 		"Set-Cookie",
 		formatSetCookieHeader(cookie.name, params.token, cookie.attributes),
 	);
+}
+
+/**
+ * Clears the session JWT from response headers (expired Set-Cookie or removed `set-auth-token`).
+ */
+export function clearTokenFromHeaders(
+	headers: Headers,
+	params: ClearTokenParams,
+): void {
+	if (params.tokenPlacement === "header") {
+		headers.delete(SET_AUTH_TOKEN_HEADER);
+		return;
+	}
+
+	const cookie = params.createAuthCookie(params.cookieName, { maxAge: 0 });
+
+	headers.append(
+		"Set-Cookie",
+		formatSetCookieHeader(cookie.name, "", cookie.attributes),
+	);
+}
+
+/**
+ * Returns true when a `Set-Cookie` value clears the named cookie (empty value, Max-Age=0).
+ */
+export function isClearingSetCookie(
+	setCookie: string,
+	cookieName: string,
+): boolean {
+	const name = getSetCookieName(setCookie);
+	if (name !== cookieName) {
+		return false;
+	}
+
+	const [nameValue] = setCookie.split(";");
+	const trimmed = nameValue?.trim() ?? "";
+	const separatorIndex = trimmed.indexOf("=");
+	if (separatorIndex === -1) {
+		return false;
+	}
+
+	const value = trimmed.slice(separatorIndex + 1);
+	if (value !== "") {
+		return false;
+	}
+
+	return /(?:^|;)\s*Max-Age=0(?:\s*;|$)/i.test(setCookie);
 }
 
 /**
@@ -118,4 +171,19 @@ function formatSameSite(
 	}
 
 	return sameSite;
+}
+
+function getSetCookieName(setCookie: string): string | null {
+	const [nameValue] = setCookie.split(";");
+	const trimmed = nameValue?.trim();
+	if (!trimmed) {
+		return null;
+	}
+
+	const separatorIndex = trimmed.indexOf("=");
+	if (separatorIndex === -1) {
+		return null;
+	}
+
+	return trimmed.slice(0, separatorIndex).trim();
 }

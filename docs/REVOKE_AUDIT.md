@@ -6,28 +6,27 @@ Audit target: confirm Better Auth revocation flows remove the session row (or do
 
 ## Checklist
 
-| Path | API / endpoint | Session row effect | SCJWT after revoke | Automated test | Notes |
-|------|----------------|-------------------|-------------------|----------------|-------|
-| Sign out | `auth.api.signOut` / `POST /sign-out` | DELETE current row | Dead (`401`) | Yes | Client cookie may remain until patch-02 |
-| Revoke one session | `auth.api.revokeSession` / `POST /revoke-session` | DELETE target row | Dead (`401`) | Yes | Body: `{ token }` |
-| Revoke other sessions | `auth.api.revokeOtherSessions` / `POST /revoke-other-sessions` | DELETE other rows | Other JWTs dead | Yes | Current session kept |
-| Revoke all sessions | `auth.api.revokeSessions` / `POST /revoke-sessions` | DELETE all user rows | Dead (`401`) | Stretch | Includes current session |
-| Change password (default) | `auth.api.changePassword` | **No change** | **Still valid until `exp`** | Yes (negative) | Host must pass `revokeOtherSessions: true` to kill other devices |
-| Change password + revoke | `auth.api.changePassword` + `revokeOtherSessions: true` | DELETE all + new row | Old JWTs dead | Yes | New session token returned |
-| Reset password | `auth.api.resetPassword` | DELETE all **if** `emailAndPassword.revokeSessionsOnPasswordReset: true` | Dead when configured | No | Host-config dependent |
-| Delete user | `auth.api.deleteUser` | DELETE all user sessions | Dead (`401`) | Stretch | Requires `user.deleteUser.enabled` |
-| Ban user | `auth.api.banUser` (admin plugin) | DELETE all target sessions | Dead (`401`) | Follow-up issue | Requires `admin()` plugin |
-| Unban user | `auth.api.unbanUser` (admin plugin) | No session restore | N/A (sessions already gone) | Follow-up issue | Does not recreate sessions |
-| Stop impersonating | `auth.api.stopImpersonating` (admin plugin) | DELETE impersonation row | Dead (`401`) | Follow-up issue | Admin session restored via cookie |
-| Admin revoke session | `auth.api.revokeUserSession` (admin plugin) | DELETE target row | Dead (`401`) | Follow-up issue | Admin-gated |
-| Admin revoke all | `auth.api.revokeUserSessions` (admin plugin) | DELETE all target rows | Dead (`401`) | Follow-up issue | Admin-gated |
-| Fingerprint mismatch | SCJWT `onRequest` | DELETE compromised row | Dead (`401`) | Yes (`on-request.test.ts`) | Plugin-initiated revoke |
+| Path | API / endpoint | Session row effect | SCJWT after revoke | Client token cleared | Automated test | Notes |
+|------|----------------|-------------------|-------------------|---------------------|----------------|-------|
+| Sign out | `auth.api.signOut` / `POST /sign-out` | DELETE current row | Dead (`401`) | Yes | Yes (`token-clear.test.ts`) | Cookie `Max-Age=0` or header removed |
+| Revoke one session | `auth.api.revokeSession` / `POST /revoke-session` | DELETE target row | Dead (`401`) | When current session revoked | Yes | Body: `{ token }`; other devices unchanged |
+| Revoke other sessions | `auth.api.revokeOtherSessions` / `POST /revoke-other-sessions` | DELETE other rows | Other JWTs dead | No (current kept) | Yes | Current session kept |
+| Revoke all sessions | `auth.api.revokeSessions` / `POST /revoke-sessions` | DELETE all user rows | Dead (`401`) | Yes | Yes | Includes current session |
+| Change password (default) | `auth.api.changePassword` | **No change** | **Still valid until `exp`** | No | Yes (negative) | Host must pass `revokeOtherSessions: true` to kill other devices |
+| Change password + revoke | `auth.api.changePassword` + `revokeOtherSessions: true` | DELETE all + new row | Old JWTs dead | No | Yes | New session token returned |
+| Reset password | `auth.api.resetPassword` | DELETE all **if** `emailAndPassword.revokeSessionsOnPasswordReset: true` | Dead when configured | No | No | Host-config dependent |
+| Delete user | `auth.api.deleteUser` | DELETE all user sessions | Dead (`401`) | Stretch | Stretch | Requires `user.deleteUser.enabled` |
+| Ban user | `auth.api.banUser` (admin plugin) | DELETE all target sessions | Dead (`401`) | Stretch | Follow-up issue | Requires `admin()` plugin |
+| Unban user | `auth.api.unbanUser` (admin plugin) | No session restore | N/A (sessions already gone) | N/A | Follow-up issue | Does not recreate sessions |
+| Stop impersonating | `auth.api.stopImpersonating` (admin plugin) | DELETE impersonation row | Dead (`401`) | Stretch | Follow-up issue | Admin session restored via cookie |
+| Admin revoke session | `auth.api.revokeUserSession` (admin plugin) | DELETE target row | Dead (`401`) | Stretch | Follow-up issue | Admin-gated |
+| Admin revoke all | `auth.api.revokeUserSessions` (admin plugin) | DELETE all target rows | Dead (`401`) | Stretch | Follow-up issue | Admin-gated |
+| Fingerprint mismatch | SCJWT `onRequest` | DELETE compromised row | Dead (`401`) | N/A | Yes (`on-request.test.ts`) | Plugin-initiated revoke |
 
 ## Host configuration recommendations
 
 - **`changePassword`**: pass `revokeOtherSessions: true` when changing password if other devices should lose SCJWT access immediately.
 - **`emailAndPassword.revokeSessionsOnPasswordReset`**: set `true` if password reset should invalidate all sessions.
-- **Sign-out**: gateway rejects revoked JWTs even though the client cookie is not cleared yet ([issue #2](https://github.com/dark1zinn/better-auth-scjwt/issues/2) tracks cookie clearing).
 
 ## Admin plugin follow-up
 
@@ -36,5 +35,7 @@ Automated tests for admin-plugin paths are tracked in [#8](https://github.com/da
 ## References
 
 - [`src/plugin/session-bridge.ts`](../src/plugin/session-bridge.ts) — `loadSessionIntoContext`
-- [`test/revoke-paths.test.ts`](../test/revoke-paths.test.ts) — core path integration tests
+- [`src/plugin/revoke-hooks.ts`](../src/plugin/revoke-hooks.ts) — client token clearing on sign-out / revoke
+- [`test/revoke-paths.test.ts`](../test/revoke-paths.test.ts) — gateway invalidation tests
+- [`test/token-clear.test.ts`](../test/token-clear.test.ts) — client cookie/header clearing tests
 - [Better Auth test-utils](https://better-auth.com/docs/plugins/test-utils)

@@ -126,7 +126,7 @@ Strict v1 payload (no extra claims):
 - **Database as source of truth** — Revoking or deleting the session row invalidates the JWT immediately on the next gateway request (`401`, `"Session not found."`). SCJWT does not maintain a separate revocation list.
 - **Revocation via Better Auth** — When Better Auth deletes the session row, SCJWT is dead. Verified core paths (Better Auth v1.6.14): `signOut`, `revokeSession`, `revokeOtherSessions`, and `changePassword` with `revokeOtherSessions: true`. Full audit: [`docs/REVOKE_AUDIT.md`](./docs/REVOKE_AUDIT.md).
 - **Host configuration matters** — `changePassword` does **not** delete session rows by default; other devices keep valid SCJWTs until `exp` unless you pass `revokeOtherSessions: true`. For password reset, enable `emailAndPassword.revokeSessionsOnPasswordReset` if all sessions should end.
-- **Sign-out vs client cookie** — `signOut` deletes the database row (gateway rejects the JWT on the next request) but does not yet clear the SCJWT cookie on the client ([#2](https://github.com/dark1zinn/better-auth-scjwt/issues/2)).
+- **Client token clearing** — On `signOut`, `revokeSessions`, and `revokeSession` when the current session is revoked, SCJWT clears the cookie (`Max-Age=0`) or removes `set-auth-token`. `revokeOtherSessions` does not clear the current client's token (other devices' JWTs are invalidated server-side only). Header-mode clients should still drop any locally cached Bearer token.
 - **Device binding** — Each token embeds a fingerprint (`fp`) derived from client IP, User-Agent, and `Sec-CH-UA-Platform`. A mismatch is treated as compromise: the session row is deleted and the request returns `401`.
 - **Fail-closed** — Invalid, expired, or mismatched tokens reject the request; missing tokens fall through to standard Better Auth handling.
 - **Opaque payload** — No user profile data in the JWT; only the session pointer and fingerprint.
@@ -144,7 +144,6 @@ Tests live in `test/` at the project root. Integration tests use Better Auth's [
 ## Compatibility notes
 
 - **Issuance paths:** JWT delivery hooks run after `/sign-in/*` and `/sign-up/*`. OAuth, magic-link, and other session-creating flows are not covered yet.
-- **Sign-out:** JWT cookies/headers are not cleared on sign-out yet ([#2](https://github.com/dark1zinn/better-auth-scjwt/issues/2)); the session row is still deleted and the JWT is rejected at the gateway.
 - **Reverse proxies:** Fingerprint uses the request IP as seen by Better Auth (`getIp`). Clients behind proxies may need consistent IP extraction configuration.
 
 ## License

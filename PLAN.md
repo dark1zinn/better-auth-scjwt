@@ -256,6 +256,19 @@ Extend DB session expiresAt, re-sign JWT, queue token on auth context
 
 When a sliding refresh was queued during `onRequest`, `onResponse` delivers the new JWT (cookie or `set-auth-token` header) and clears the pending entry from the auth context.
 
+### 4.4 Token clearing (`hooks.after`)
+
+On sign-out and session revoke, after-hooks clear the client-held SCJWT:
+
+| Endpoint | Clear behavior |
+|----------|----------------|
+| `/sign-out` | Always clear cookie (`Max-Age=0`) or remove `set-auth-token` |
+| `/revoke-sessions` | Always clear |
+| `/revoke-session` | Clear only when the revoked token is the caller's current session |
+| `/revoke-other-sessions` | No clear (current session remains valid) |
+
+Cookie attributes mirror issuance via Better Auth's `createAuthCookie`. Header-mode clients must still drop any locally cached Bearer token.
+
 ## 5. Security Fail-Safes & Edge Cases
 
 An implementing engine or agent must explicitly verify and test code logic compliance against the following edge cases:
