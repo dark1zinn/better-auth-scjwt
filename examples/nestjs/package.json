@@ -11,9 +11,9 @@
     "build": "nest build",
     "auth:migrate": "bunx --bun auth@latest migrate --config ./src/auth.ts --yes",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
-    "start": "nest start",
-    "start:dev": "nest start --watch",
-    "start:debug": "nest start --debug --watch",
+    "start": "nest start --exec bun",
+    "start:dev": "nest start --watch --exec bun",
+    "start:debug": "nest start --debug --watch --exec bun",
     "start:prod": "bun dist/main.js",
     "lint": "oxlint --type-aware src/ test/",
     "sync:scjwt": "bun run --cwd ../.. build && bun install --cwd ../.. --force",
@@ -23,7 +23,7 @@
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "pretest:e2e": "bun run sync:scjwt",
-    "test:e2e": "vitest run --config ./vitest.config.e2e.ts"
+    "test:e2e": "bunx --bun vitest run --config ./vitest.config.e2e.ts"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
