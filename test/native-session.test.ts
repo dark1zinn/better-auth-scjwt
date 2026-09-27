@@ -43,6 +43,26 @@ function createCallbackFixture(getUserId: () => string): BetterAuthPlugin {
 					return ctx.json({ ok: true });
 				},
 			),
+			callbackRedirectFixture: createAuthEndpoint(
+				"/callback-fixture-redirect",
+				{ method: "POST" },
+				async (ctx) => {
+					await establishSession(ctx);
+					throw ctx.redirect("/signed-in");
+				},
+			),
+			unrelatedFailureFixture: createAuthEndpoint(
+				"/unrelated-failure",
+				{ method: "POST" },
+				async () => {
+					throw APIError.fromStatus("BAD_REQUEST");
+				},
+			),
+			unrelatedResponseFailureFixture: createAuthEndpoint(
+				"/unrelated-response-failure",
+				{ method: "POST" },
+				async () => new Response("request failed", { status: 422 }),
+			),
 			callbackFailureFixture: createAuthEndpoint(
 				"/callback-fixture-failure",
 				{ method: "POST" },
@@ -237,6 +257,77 @@ describe("native Better Auth session transport", () => {
 		).get(context.authCookies.sessionToken.name);
 		expect(response.status).toBe(200);
 		expect(sessionCookie?.value.split(".")).toHaveLength(3);
+	});
+
+	test("issues usable SCJWTs on successful callback redirects", async () => {
+		for (const tokenPlacement of ["cookie", "header"] as const) {
+			let fixtureUserId = "";
+			const auth = betterAuth({
+				database: memoryAdapter(createMemoryDB()),
+				baseURL: TEST_BASE_URL,
+				secret: TEST_SECRET,
+				session: { cookieCache: { enabled: true } },
+				plugins: [testUtils(), createCallbackFixture(() => fixtureUserId), scjwt({ tokenPlacement })],
+			});
+			const context = await auth.$context;
+			const user = await context.test.saveUser(context.test.createUser());
+			fixtureUserId = user.id;
+			const response = await auth.handler(
+				new Request(`${TEST_BASE_URL}/api/auth/callback-fixture-redirect`, {
+					method: "POST",
+					headers: STABLE_HEADERS,
+				}),
+			);
+			expect(response.status).toBe(302);
+			expect(response.headers.get("location")).toBe("/signed-in");
+			const cookies = parseSetCookieHeader(response.headers.get("set-cookie") ?? "");
+			const token = tokenPlacement === "cookie"
+				? cookies.get(context.authCookies.sessionToken.name)?.value
+				: response.headers.get("set-auth-token");
+			expect(token?.split(".")).toHaveLength(3);
+			if (tokenPlacement === "cookie") {
+				expect(cookies.get(context.authCookies.sessionData.name)?.value).toBeTruthy();
+			} else {
+				expect(cookies.has(context.authCookies.sessionToken.name)).toBe(false);
+				expect(cookies.has(context.authCookies.sessionData.name)).toBe(false);
+			}
+			const headers = tokenPlacement === "cookie"
+				? createCookieHeaders(context.authCookies.sessionToken.name, token!)
+				: new Headers({ ...STABLE_HEADERS, authorization: `Bearer ${token}` });
+			const sessionResponse = await requestSession(auth, headers);
+			expect(sessionResponse.status).toBe(200);
+			expect(await sessionResponse.json()).toMatchObject({ user: { id: user.id } });
+		}
+	});
+
+	test("preserves an existing session on unrelated failed requests", async () => {
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			session: { cookieCache: { enabled: true } },
+			plugins: [createCallbackFixture(() => ""), scjwt()],
+		});
+		const issued = await signUpWithScjwt(auth, "unrelated-failure@example.com");
+		const headers = createCookieHeaders(issued.cookieName, issued.token);
+		for (const [path, status] of [
+			["unrelated-failure", 400],
+			["unrelated-response-failure", 422],
+		] as const) {
+			const response = await auth.handler(
+				new Request(`${TEST_BASE_URL}/api/auth/${path}`, { method: "POST", headers }),
+			);
+			expect(response.status).toBe(status);
+			expect(response.headers.get("set-cookie")).toBeNull();
+			expect(response.headers.get("set-auth-token")).toBeNull();
+			expect(db.session).toHaveLength(1);
+			const sessionResponse = await requestSession(auth, headers);
+			expect(await sessionResponse.json()).toMatchObject({
+				user: { email: "unrelated-failure@example.com" },
+			});
+		}
 	});
 
 	test("skips callback issuance for API errors and non-2xx responses", async () => {

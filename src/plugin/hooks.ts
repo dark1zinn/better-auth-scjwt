@@ -139,9 +139,13 @@ export function createScjwtHooks(
 			{
 				matcher: () => true,
 				handler: createAuthMiddleware(async (ctx) => {
+					const newSession = ctx.context.newSession;
+					if (!newSession) {
+						return;
+					}
 					const returned = ctx.context.returned;
 					if (
-						isAPIError(returned) ||
+						(isAPIError(returned) && returned.statusCode >= 400) ||
 						(returned instanceof Response && !returned.ok)
 					) {
 						expireCookie(ctx, ctx.context.authCookies.sessionToken);
@@ -149,11 +153,6 @@ export function createScjwtHooks(
 						expireCookie(ctx, ctx.context.authCookies.dontRememberToken);
 						return;
 					}
-					const newSession = ctx.context.newSession;
-					if (!newSession) {
-						return;
-					}
-
 					const headers =
 						ctx.request?.headers ?? ctx.headers ?? new Headers();
 					const input = getRequestFingerprintInput(
