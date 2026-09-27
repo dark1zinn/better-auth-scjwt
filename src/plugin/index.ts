@@ -1,28 +1,52 @@
 import type { BetterAuthPlugin } from "better-auth";
-import { PLUGIN_ID } from "./constants";
-import { createIssuanceAfterHooks } from "./hooks";
-import { createOnRequest } from "./on-request";
-import { createOnResponse } from "./on-response";
-import { createRevokeClearAfterHooks } from "./revoke-hooks";
-import { createDatabaseRequiredInit, resolveOptions } from "./resolve-options";
+import { DEFAULT_FINGERPRINT_MODE, DEFAULT_TOKEN_PLACEMENT, PLUGIN_ID } from "./constants";
+import { createScjwtHooks } from "./hooks";
 import type { ResolvedScjwtOptions, ScjwtOptions } from "./types";
 
-export function scjwt(userOptions: ScjwtOptions): BetterAuthPlugin {
-	const options = resolveOptions(userOptions);
-	return createPlugin(options);
+declare module "@better-auth/core" {
+	interface BetterAuthPluginRegistry<AuthOptions, Options> {
+		scjwt: {
+			creator: typeof scjwt;
+		};
+	}
 }
 
-function createPlugin(options: ResolvedScjwtOptions): BetterAuthPlugin {
+export function scjwt(options: ScjwtOptions = {}): BetterAuthPlugin {
+	const resolved = resolveOptions(options);
 	return {
 		id: PLUGIN_ID,
-		init: createDatabaseRequiredInit(),
-		hooks: {
-			after: [
-				...createIssuanceAfterHooks(options).after,
-				...createRevokeClearAfterHooks(options).after,
-			],
+		options,
+		init(context) {
+			if (context.options.database === undefined) {
+				throw new Error(
+					"[scjwt] a Better Auth database is required; stateless sessions are unsupported.",
+				);
+			}
+			if (
+				context.options.secondaryStorage !== undefined &&
+				context.options.session?.storeSessionInDatabase !== true
+			) {
+				throw new Error(
+					"[scjwt] secondaryStorage requires session.storeSessionInDatabase: true so SCJWT sessions remain immediately revocable from the database.",
+				);
+			}
 		},
-		onRequest: createOnRequest(options),
-		onResponse: createOnResponse(options),
+		hooks: createScjwtHooks(resolved),
 	} satisfies BetterAuthPlugin;
+}
+
+function resolveOptions(options: ScjwtOptions): ResolvedScjwtOptions {
+	const tokenPlacement = options.tokenPlacement ?? DEFAULT_TOKEN_PLACEMENT;
+	if (tokenPlacement !== "cookie" && tokenPlacement !== "header") {
+		throw new Error('[scjwt] tokenPlacement must be "cookie" or "header".');
+	}
+	const fingerprintMode = options.fingerprintMode ?? DEFAULT_FINGERPRINT_MODE;
+	if (fingerprintMode !== "strict" && fingerprintMode !== "ip-only") {
+		throw new Error('[scjwt] fingerprintMode must be "strict" or "ip-only".');
+	}
+	return {
+		tokenPlacement,
+		fingerprintMode,
+		getCustomClaims: options.getCustomClaims,
+	};
 }

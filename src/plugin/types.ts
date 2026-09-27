@@ -1,83 +1,42 @@
-/**
- * User-facing plugin configuration. Optional fields receive defaults via
- * {@link ResolvedScjwtOptions}.
- */
+import type { Awaitable, Session, User } from "better-auth";
+
+export type JsonValue =
+	| string
+	| number
+	| boolean
+	| null
+	| JsonValue[]
+	| { [key: string]: JsonValue };
+
+export interface ScjwtClaimContext {
+	session: Session & Record<string, unknown>;
+	user: User & Record<string, unknown>;
+	request: Request | undefined;
+}
+
 export interface ScjwtOptions {
-	/**
-	 * Cryptographic key used to sign and verify HS256 JWT tokens.
-	 */
-	jwtSecret: string;
-	/**
-	 * Fully qualified URL of the token issuer authority (maps to JWT `iss`).
-	 */
-	issuer: string;
-	/**
-	 * JWT and session validity window in seconds.
-	 * @default 3600
-	 */
-	expiresInSeconds?: number;
-	/**
-	 * HTTP-only cookie name when `tokenPlacement` is `"cookie"`.
-	 * @default "auth-token"
-	 */
-	cookieName?: string;
-	/**
-	 * Transport strategy for the session JWT.
-	 * - `"cookie"` — HTTP-only, Secure, SameSite=Lax
-	 * - `"header"` — `set-auth-token` response header / `Authorization: Bearer`
-	 * @default "cookie"
-	 */
-	tokenPlacement?: TokenPlacement;
-	/**
-	 * When enabled, actively used sessions receive an automatic JWT re-sign
-	 * before expiry (20% lifetime threshold).
-	 * @default false
-	 */
-	slidingSession?: boolean;
+	tokenPlacement?: "cookie" | "header";
+	fingerprintMode?: "strict" | "ip-only";
+	getCustomClaims?: (
+		context: ScjwtClaimContext,
+	) => Awaitable<Record<string, JsonValue>>;
 }
 
-export type TokenPlacement = "cookie" | "header";
+export type TokenPlacement = NonNullable<ScjwtOptions["tokenPlacement"]>;
+export type FingerprintMode = NonNullable<ScjwtOptions["fingerprintMode"]>;
 
-/**
- * Fully resolved configuration with all defaults applied.
- */
 export interface ResolvedScjwtOptions {
-	jwtSecret: string;
-	issuer: string;
-	expiresInSeconds: number;
-	cookieName: string;
 	tokenPlacement: TokenPlacement;
-	slidingSession: boolean;
+	fingerprintMode: FingerprintMode;
+	getCustomClaims?: ScjwtOptions["getCustomClaims"];
 }
 
-/**
- * Strict JWT payload contract (v1). Required claims only; no additional properties.
- *
- * - `iss` — issuer URL from plugin options
- * - `sub` — `user:{userId}` namespace-prefixed subject
- * - `fp` — 64-char lowercase SHA-256 hex client fingerprint
- * - `iat` / `exp` — issued-at and expiry as Unix epoch seconds
- * - `sid` — database session row primary key
- */
 export interface ScjwtJwtPayload {
-	/** Token issuer — mirrors `options.issuer`. */
 	iss: string;
-	/** Namespace-prefixed user id: `user:{userId}`. */
 	sub: string;
-	/** SHA-256 hex digest of client network/device constraints. */
 	fp: string;
-	/** Unix epoch seconds at issuance. */
 	iat: number;
-	/** Unix epoch seconds at cryptographic expiry. */
 	exp: number;
-	/** Database primary key of the backing session row. */
 	sid: string;
-}
-
-/**
- * Pending sliding-session token queued during `onRequest` for delivery in `onResponse`.
- */
-export interface PendingRefresh {
-	token: string;
-	placement: TokenPlacement;
+	[key: string]: JsonValue;
 }

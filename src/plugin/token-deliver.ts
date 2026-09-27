@@ -1,189 +1,113 @@
-import type { AuthContext } from "better-auth";
-import type { CookieOptions } from "better-call";
+import type { BetterAuthCookies, CookieAttributes } from "@better-auth/core";
+import {
+	parseSetCookieHeader,
+	splitSetCookieHeader,
+	toCookieOptions,
+} from "better-auth/cookies";
+import { serializeCookie } from "better-call";
 import type { TokenPlacement } from "./types";
 
-/** Response header used in `header` placement (matches Better Auth Bearer convention). */
 export const SET_AUTH_TOKEN_HEADER = "set-auth-token";
 
-export type CreateAuthCookie = AuthContext["createAuthCookie"];
-
-export interface DeliverTokenParams {
-	token: string;
-	tokenPlacement: TokenPlacement;
-	expiresInSeconds: number;
-	cookieName: string;
-	createAuthCookie: CreateAuthCookie;
-}
-
-export interface ClearTokenParams {
-	tokenPlacement: TokenPlacement;
-	cookieName: string;
-	createAuthCookie: CreateAuthCookie;
-}
-
-/**
- * Resolves cookie name/attributes via Better Auth's `createAuthCookie` helper.
- */
-export function resolveAuthCookie(
-	createAuthCookie: CreateAuthCookie,
-	cookieName: string,
-	expiresInSeconds: number,
-): ReturnType<CreateAuthCookie> {
-	return createAuthCookie(cookieName, { maxAge: expiresInSeconds });
-}
-
-/**
- * Appends the session JWT to response headers (Set-Cookie or `set-auth-token`).
- */
-export function applyTokenToHeaders(
+export function deliverSessionToken(
 	headers: Headers,
-	params: DeliverTokenParams,
+	token: string,
+	tokenPlacement: TokenPlacement,
+	authCookies: BetterAuthCookies,
 ): void {
-	if (params.tokenPlacement === "header") {
-		headers.set(SET_AUTH_TOKEN_HEADER, params.token);
-		return;
+	const setCookies = getSetCookieValues(headers);
+	const nextCookies: string[] = [];
+
+	for (const setCookie of setCookies) {
+		const parsed = parseSingleSetCookie(setCookie);
+		if (!parsed) {
+			nextCookies.push(setCookie);
+			continue;
+		}
+		const [name, attributes] = parsed;
+		const live = isLiveCookie(attributes);
+
+		if (
+			tokenPlacement === "cookie" &&
+			name === authCookies.sessionToken.name &&
+			live
+		) {
+			nextCookies.push(
+				serializeCookie(name, token, toCookieOptions(attributes)),
+			);
+			continue;
+		}
+
+		if (
+			tokenPlacement === "header" &&
+			live &&
+			isHeaderOnlyNativeCookie(name, authCookies)
+		) {
+			continue;
+		}
+		nextCookies.push(setCookie);
 	}
 
-	const cookie = resolveAuthCookie(
-		params.createAuthCookie,
-		params.cookieName,
-		params.expiresInSeconds,
-	);
-
-	headers.append(
-		"Set-Cookie",
-		formatSetCookieHeader(cookie.name, params.token, cookie.attributes),
-	);
-}
-
-/**
- * Clears the session JWT from response headers (expired Set-Cookie or removed `set-auth-token`).
- */
-export function clearTokenFromHeaders(
-	headers: Headers,
-	params: ClearTokenParams,
-): void {
-	if (params.tokenPlacement === "header") {
-		headers.delete(SET_AUTH_TOKEN_HEADER);
-		return;
+	replaceSetCookieValues(headers, nextCookies);
+	if (tokenPlacement === "header") {
+		headers.set(SET_AUTH_TOKEN_HEADER, token);
+		exposeHeader(headers, SET_AUTH_TOKEN_HEADER);
 	}
-
-	const cookie = params.createAuthCookie(params.cookieName, { maxAge: 0 });
-
-	headers.append(
-		"Set-Cookie",
-		formatSetCookieHeader(cookie.name, "", cookie.attributes),
-	);
 }
 
-/**
- * Returns true when a `Set-Cookie` value clears the named cookie (empty value, Max-Age=0).
- */
-export function isClearingSetCookie(
+function getSetCookieValues(headers: Headers): string[] {
+	const withGetSetCookie = headers as Headers & {
+		getSetCookie?: () => string[];
+	};
+	return withGetSetCookie.getSetCookie?.() ??
+		splitSetCookieHeader(headers.get("set-cookie") ?? "");
+}
+
+function replaceSetCookieValues(headers: Headers, values: string[]): void {
+	headers.delete("set-cookie");
+	for (const value of values) {
+		headers.append("set-cookie", value);
+	}
+}
+
+function parseSingleSetCookie(
 	setCookie: string,
-	cookieName: string,
-): boolean {
-	const name = getSetCookieName(setCookie);
-	if (name !== cookieName) {
-		return false;
-	}
-
-	const [nameValue] = setCookie.split(";");
-	const trimmed = nameValue?.trim() ?? "";
-	const separatorIndex = trimmed.indexOf("=");
-	if (separatorIndex === -1) {
-		return false;
-	}
-
-	const value = trimmed.slice(separatorIndex + 1);
-	if (value !== "") {
-		return false;
-	}
-
-	return /(?:^|;)\s*Max-Age=0(?:\s*;|$)/i.test(setCookie);
+): [string, CookieAttributes] | null {
+	const first = parseSetCookieHeader(setCookie).entries().next();
+	return first.done ? null : first.value;
 }
 
-/**
- * Returns a new `Response` with the session JWT attached.
- */
-export function deliverTokenToResponse(
-	response: Response,
-	params: DeliverTokenParams,
-): Response {
-	const headers = new Headers(response.headers);
-	applyTokenToHeaders(headers, params);
-
-	return new Response(response.body, {
-		status: response.status,
-		statusText: response.statusText,
-		headers,
-	});
+function isLiveCookie(attributes: {
+	value: string;
+	"max-age"?: number;
+	expires?: Date;
+}): boolean {
+	if (!attributes.value || attributes["max-age"] === 0) {
+		return false;
+	}
+	return !attributes.expires || attributes.expires.getTime() > Date.now();
 }
 
-function formatSetCookieHeader(
+function isHeaderOnlyNativeCookie(
 	name: string,
-	value: string,
-	attributes: CookieOptions,
-): string {
-	const parts = [`${name}=${value}`];
-
-	if (attributes.maxAge !== undefined) {
-		parts.push(`Max-Age=${attributes.maxAge}`);
-	}
-
-	if (attributes.expires) {
-		parts.push(`Expires=${attributes.expires.toUTCString()}`);
-	}
-
-	if (attributes.domain) {
-		parts.push(`Domain=${attributes.domain}`);
-	}
-
-	if (attributes.path) {
-		parts.push(`Path=${attributes.path}`);
-	}
-
-	if (attributes.httpOnly) {
-		parts.push("HttpOnly");
-	}
-
-	if (attributes.secure) {
-		parts.push("Secure");
-	}
-
-	if (attributes.sameSite) {
-		parts.push(`SameSite=${formatSameSite(attributes.sameSite)}`);
-	}
-
-	return parts.join("; ");
+	authCookies: BetterAuthCookies,
+): boolean {
+	return (
+		name === authCookies.sessionToken.name ||
+		name === authCookies.dontRememberToken.name ||
+		name === authCookies.sessionData.name ||
+		name.startsWith(`${authCookies.sessionData.name}.`)
+	);
 }
 
-function formatSameSite(
-	sameSite: NonNullable<CookieOptions["sameSite"]>,
-): string {
-	if (typeof sameSite !== "string") {
-		return "Lax";
+function exposeHeader(headers: Headers, headerName: string): void {
+	const exposed = new Map<string, string>();
+	for (const value of (headers.get("access-control-expose-headers") ?? "").split(",")) {
+		const name = value.trim();
+		if (name) {
+			exposed.set(name.toLowerCase(), name);
+		}
 	}
-
-	const normalized = sameSite.toLowerCase();
-	if (normalized === "lax" || normalized === "strict" || normalized === "none") {
-		return normalized.charAt(0).toUpperCase() + normalized.slice(1);
-	}
-
-	return sameSite;
-}
-
-function getSetCookieName(setCookie: string): string | null {
-	const [nameValue] = setCookie.split(";");
-	const trimmed = nameValue?.trim();
-	if (!trimmed) {
-		return null;
-	}
-
-	const separatorIndex = trimmed.indexOf("=");
-	if (separatorIndex === -1) {
-		return null;
-	}
-
-	return trimmed.slice(0, separatorIndex).trim();
+	exposed.set(headerName.toLowerCase(), headerName);
+	headers.set("access-control-expose-headers", [...exposed.values()].join(", "));
 }
