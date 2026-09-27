@@ -1,291 +1,106 @@
-# Comprehensive Technical Specification: better-auth-scjwt
+# better-auth-scjwt technical specification
 
-This document defines the architectural blueprint, structural constraints, and implementation mechanics for a custom plugin compatible with the `better-auth` ecosystem. This plugin implements a high-security, state-backed, device-fingerprinted hybrid authentication pattern named **Session-Centric JWT (SCJWT / CSJWT)**.
+This document records the implemented Better Auth 1.7 native-session design. The package exposes `better-auth-scjwt` for the server plugin and `better-auth-scjwt/client` for client-side type inference.
 
-**Package:** `better-auth-scjwt` — published from `dist/` built with [tsdown](https://tsdown.dev) (`bun run build`). Entry points: `better-auth-scjwt` (server) and `better-auth-scjwt/client` (client plugin).
+## Invariants
 
----
+1. **Database authority:** `sid` identifies a Better Auth database session row. Every presented SCJWT must resolve that row before authentication succeeds.
+2. **Immediate revocation:** a deleted or expired row makes the next SCJWT request unauthorized.
+3. **Native compatibility:** verified requests are converted into a correctly signed Better Auth session cookie and continue through the standard endpoint pipeline.
+4. **Single configuration source:** Better Auth owns secrets, issuer/base URL, session lifetime, refresh timing, cookie settings, and proxy/IP resolution.
+5. **Deterministic transport:** exactly one configured source is read. Cookie and header values never silently override each other.
+6. **Fail closed:** a present invalid SCJWT returns Better Auth `UNAUTHORIZED`; a missing token falls through.
 
-## 1. Architectural Blueprint & Core Invariants
+## Public API
 
-Standard JWT solutions delegate the ultimate source of truth directly to a stateless, cryptographically signed token. This introduces significant lag or structural complexity when handling immediate, omni-channel token revocation. 
+```ts
+export interface ScjwtOptions {
+  tokenPlacement?: "cookie" | "header";
+  fingerprintMode?: "strict" | "ip-only";
+  getCustomClaims?: (
+    context: ScjwtClaimContext,
+  ) => Awaitable<Record<string, JsonValue>>;
+}
 
-The `better-auth-csjwt` plugin overrides this behavior by combining the portability of a signed JSON Web Token with the absolute, deterministic state tracking of a database session repository.
+export function scjwt(options?: ScjwtOptions): BetterAuthPlugin;
+```
 
-### 1.1 Core Invariants
-* **Database as the Sole Source of Truth:** The JWT is strictly an un-queryable, tamper-proof pointer to an explicit database primary key row (`session.id`). A database adapter is therefore **mandatory**: the plugin fails fast at initialization (`[scjwt] database adapter is required; stateless mode is not supported.`) when Better Auth is configured without a `database`.
-* **Cryptographic Device Binding:** Every issued token embeds a physical deterministic hardware signature ($fp$). If a request contains a valid signature but exhibits a fingerprint mismatch, the token is flagged as compromised.
-* **Instant, Aggressive Poisoning (Fail-Closed):** Upon fingerprint mismatch detection, the plugin triggers an immediate side-effect: the referenced database session is deleted instantly, and the current request execution pipeline terminates with a `419` or `401 Unauthorized` state.
+Defaults are cookie placement and strict fingerprinting. There are no plugin-local secret, issuer, lifetime, cookie-name, or sliding-refresh options.
 
----
+## Initialization
 
-## 2. Token Layout & Structural Mapping
+`init` rejects missing database configuration. It also rejects `secondaryStorage` unless `session.storeSessionInDatabase` is `true`. This ensures `adapter.findOne({ model: "session", where: [{ field: "id", value: sid }] })` has an immediately revocable source of truth.
 
-The generated JWT payload must conform exactly to the following strict schema layout. No database properties or user demographic info are allowed within the payload to ensure absolute visual opacity.
+The plugin is registered in `@better-auth/core`'s `BetterAuthPluginRegistry` and publishes the user options on the plugin object.
 
-### 2.1 JSON Schema Schema Definition
+## Before hook
+
+For every endpoint:
+
+1. Read the SCJWT from the selected Better Auth session cookie or Bearer header.
+2. Verify HS256, optional versioned-secret `kid`, issuer, `exp`, core payload shape, and custom JSON shape.
+3. Load the session by `sid`; reject a missing/expired row, subject mismatch, or token lifetime beyond Better Auth's effective session limit.
+4. Recompute the selected fingerprint. Delete the backing row through `internalAdapter.deleteSession(session.token)` on mismatch.
+5. Load the user. If configured, rerun `getCustomClaims` and require exact JSON equality; do not delete the row on authorization-state mismatch.
+6. Serialize the opaque `session.token` using Better Call's signed-cookie serializer and inject it under `ctx.context.authCookies.sessionToken.name` with Better Auth's `setRequestCookie`.
+7. Populate `ctx.context.session` and continue the native pipeline.
+
+## After hook
+
+For every successful endpoint with `ctx.context.newSession`:
+
+1. Derive the fingerprint from Better Auth `getIP` plus the configured browser inputs.
+2. Resolve and validate custom claims.
+3. Set `iat` and cap `exp` to `min(session.expiresAt, iat + sessionConfig.expiresIn)`.
+4. Sign with Better Auth's current secret material.
+5. Replace the live native session-token cookie or emit `set-auth-token`, according to placement.
+
+Returned API errors and non-2xx `Response` values do not receive a replacement token. Better Auth `session.updateAge` is the only refresh policy.
+
+## Token schema
+
+Required claims:
+
 ```json
 {
-  "$schema": "[https://json-schema.org/draft/2020-12/schema](https://json-schema.org/draft/2020-12/schema)",
-  "title": "CentricJWTSessionPayload",
-  "type": "object",
-  "properties": {
-    "iss": {
-      "type": "string",
-      "description": "Fully qualified URL of the token issuer authority."
-    },
-    "sub": {
-      "type": "string",
-      "pattern": "^user:[a-zA-Z0-9_\\-]+$",
-      "description": "Namespace-prefixed identifier mapping back to the user identity record."
-    },
-    "fp": {
-      "type": "string",
-      "pattern": "^[a-f0-9]{64}$",
-      "description": "Deterministic SHA-256 hex digest representing client network/device constraints."
-    },
-    "iat": {
-      "type": "integer",
-      "description": "Unix epoch timestamp designating token generation runtime."
-    },
-    "exp": {
-      "type": "integer",
-      "description": "Unix epoch timestamp dictating strict cryptographic death."
-    },
-    "sid": {
-      "type": "string",
-      "description": "The exact database primary key identifying the tracking session row."
-    }
-  },
-  "required": ["iss", "sub", "fp", "iat", "exp", "sid"],
-  "additionalProperties": false
+  "iss": "<resolved Better Auth auth base URL>",
+  "sub": "user:<user id>",
+  "fp": "<64 lowercase SHA-256 hex characters>",
+  "iat": 0,
+  "exp": 0,
+  "sid": "<session row id>"
 }
 ```
 
-### 2.2 Concrete Mapping Dictionary
+Optional resolver claims are limited to 16 top-level keys, 1024 UTF-8 JSON bytes, and eight nested containers. Registered JWT names and `fp`/`sid` are reserved. Non-finite numbers, non-JSON primitives, cycles, and class instances are rejected.
 
-- `iss`: Value extracted directly from plugin configuration parameters (`options.issuer`).
-    
-- `sub`: Literal template string `user:${session.userId}`.
-    
-- `fp`: Hex output of `SHA-256(JSON.stringify({ ip, ua, platform }))`.
-    
-- `sid`: The exact `session.id` string yielded by the underlying `better-auth` database adapter.
-    
+## Secret handling
 
-## 3. Configuration & Interface API Design
+- `secretConfig: string`: sign and verify directly; reject unexpected `kid`.
+- Versioned `SecretConfig`: sign with `currentVersion`, include it as `kid`, and verify only a matching retained map entry.
+- Algorithm: HS256 only.
 
-The plugin must expose a clean, strongly typed factory function adhering to the standard `BetterAuthPlugin` typing specifications.
+## Response cookies
 
-### 3.1 TypeScript Definitions
+Cookie processing uses Better Auth's public `parseSetCookieHeader`, `splitSetCookieHeader`, `toCookieOptions`, and `setRequestCookie` helpers plus Better Call serialization. It does not maintain a competing cookie-name or prefix implementation.
 
-```ts
-import { BetterAuthPlugin } from "better-auth";
+Cookie placement retains native cache/account cookies. Header placement removes live session/session-data/`dontRemember` cookies, retains account and clearing cookies, and adds `set-auth-token` once to `Access-Control-Expose-Headers`.
 
-export interface ScjwtOptions {
-  /**
-   * Cryptographic key used to sign and verify HS256 JWT tokens.
-   */
-  jwtSecret: string;
-  /**
-   * The explicit string asserting authority over token issuance (e.g., 'https://api.domain.com').
-   */
-  issuer: string;
-  /**
-   * Window of structural validity for the cryptographic envelope in seconds.
-   * @default 3600
-   */
-  expiresInSeconds?: number;
-  /**
-   * HTTP-only cookie name when `tokenPlacement` is `"cookie"`.
-   * @default "auth-token"
-   */
-  cookieName?: string;
-  /**
-   * Transport strategy for the session JWT.
-   * - `"cookie"` — HTTP-only, Secure, SameSite=Lax via Better Auth `createAuthCookie`
-   * - `"header"` — `set-auth-token` response header; clients send `Authorization: Bearer <JWT>`
-   * @default "cookie"
-   */
-  tokenPlacement?: "cookie" | "header";
-  /**
-   * When enabled, actively used sessions receive an automatic JWT re-sign before expiry.
-   * Refresh runs when remaining lifetime is at or below 20% of `expiresInSeconds`.
-   * @default false
-   */
-  slidingSession?: boolean;
-}
+## Runtime compatibility
 
-export declare const scjwt: (options: ScjwtOptions) => BetterAuthPlugin;
+Fingerprint hashing uses `globalThis.crypto.subtle.digest`. Runtime code has no `node:crypto` dependency and remains compatible with Fetch-based Node, Bun, Deno, Worker, and framework adapter environments supported by Better Auth.
+
+## Verification gates
+
+```bash
+bun install
+bun test test/native-session.test.ts
+bun test test/custom-claims.test.ts
+bun test test/fingerprint-mode.test.ts
+bun test test/secondary-storage.test.ts
+bun test test/admin-revoke-paths.test.ts
+bun test
+bun run build
 ```
 
-Client plugin (type inference only; no client-side refresh logic):
-
-```ts
-import { scjwtClient } from "better-auth-scjwt/client";
-
-// pairs with server scjwt() via $InferServerPlugin
-scjwtClient();
-```
-
-### 3.2 Sliding session (opt-in)
-
-Sliding refresh is **disabled by default** (`slidingSession: false`). When enabled:
-
-1. During `onRequest`, if remaining JWT lifetime ≤ `floor(expiresInSeconds × 0.2)`, extend the database session `expiresAt` and re-sign the JWT.
-2. Queue the new token on the auth context during `onRequest`.
-3. Deliver the new token in `onResponse` via the configured `tokenPlacement`.
-
-Native Better Auth `session.updateAge` refresh does not propagate to SCJWT clients. When using `slidingSession: true`, recommend `session.disableSessionRefresh: true` on the host `betterAuth()` config to avoid conflicting refresh behavior.
-
-## 4. Lifecycle Hook Mechanics & Execution Pipeline
-
-The runtime environment handles requests through two distinct phases: intercepting creation vectors (`hooks.after`) and intercepting authorization sweeps (`onRequest`).
-
-### 4.1 Token Issuance Loop (`hooks.after`)
-
-This interceptor hooks execution after standard authentication pathways (`/sign-in/*`, `/sign-up/*`) complete processing and have successfully committed an active session tracking record to the storage adapter layer.
-
-```
-[Authentication Success]
-         │
-         ▼
-Extract Context (session.id, session.userId)
-         │
-         ▼
-Compute Fingerprint (IP + User-Agent + Platform)
-         │
-         ▼
-Calculate SHA-256 Hex Hash (fp)
-         │
-         ▼
-Cap JWT TTL to min(options.expiresInSeconds, session.expiresAt − now)
-         │
-         ▼
-Sign JWT (HS256) via jose Framework
-         │
-         ▼
-Strip Default Opaque Better-Auth Cookies (Set-Cookie: clear)
-         │
-         ▼
-┌─────────────────────────┴─────────────────────────┐
-│ tokenPlacement === "cookie"                       │ tokenPlacement === "header"
-▼                                                   ▼
-Append HTTP-Only Cookie Header                      Set `set-auth-token` response header
-Max-Age, Secure, SameSite=Lax                       (CORS expose-headers: future patch)
-└─────────────────────────┬─────────────────────────┘
-         │
-         ▼
-[Return Response to Client Context]
-```
-
-### 4.2 Gateway Guard Loop (`onRequest`)
-
-This interceptor intercepts **every** incoming network transaction handled by the host endpoint architecture before internal routing patterns or resource layers compute business logic.
-
-```
-[Incoming Request Processed]
-         │
-         ▼
-┌─────────────────────────┴─────────────────────────┐
-│ Configured Mode: "cookie"                          │ Configured Mode: "header"
-▼                                                   ▼
-Extract value from cookieName                       Extract value from 'Authorization' Header
-└─────────────────────────┬─────────────────────────┘
-         │
-         ▼
-Token Found? ───[ No ]───> [Exit Interceptor: Fall Through to Standard Handling]
-         │
-       [ Yes ]
-         │
-         ▼
-Execute jose.jwtVerify() Signature Check using options.jwtSecret
-         │
-         ├─► [Signature/Exp Failure] ───► Throw APIError("UNAUTHORIZED")
-         │
-         ▼
-Extract Claims payload: { sid, fp, sub }
-         │
-         ▼
-Gather Current Request Context Attributes (IP, UA, Platform)
-         │
-         ▼
-Compute currentFpHash = SHA-256(Current Attributes)
-         │
-         ▼
-Does currentFpHash === payload.fp?
-         │
-       ├───[ No: Token Compromised ]
-         │         │
-         │         ▼
-         │   Execute Database Command: adapter.delete("session", where id == payload.sid)
-         │         │
-         │         ▼
-         │   Throw APIError("UNAUTHORIZED", "Machine fingerprint mismatch. Session revoked.")
-         │
-       [ Yes ]
-         │
-         ▼
-Query Storage: adapter.findOne("session", where id == payload.sid)
-         │
-         ├─► [Row Missing] ───► Throw APIError("UNAUTHORIZED")
-         │
-         ▼
-Effective expiry = min(payload.exp, session.expiresAt). Past now?
-         │
-         ├─► [Yes: Session Dead] ───► Throw APIError("UNAUTHORIZED", "Session has expired.")
-         │
-         ▼
-Map Context: Assign database session record to context.session object
-         │
-         ▼
-slidingSession enabled and remaining lifetime ≤ 20% threshold?
-         │
-       ├───[ No ]───> [Exit onRequest]
-         │
-       [ Yes ]
-         │
-         ▼
-Extend DB session expiresAt, re-sign JWT, queue token on auth context
-         │
-         ▼
-[Exit onRequest: Request Cleared to Continue Downstream Pipeline]
-```
-
-### 4.3 Token re-delivery (`onResponse`)
-
-When a sliding refresh was queued during `onRequest`, `onResponse` delivers the new JWT (cookie or `set-auth-token` header) and clears the pending entry from the auth context.
-
-### 4.4 Token clearing (`hooks.after`)
-
-On sign-out and session revoke, after-hooks clear the client-held SCJWT:
-
-| Endpoint | Clear behavior |
-|----------|----------------|
-| `/sign-out` | Always clear cookie (`Max-Age=0`) or remove `set-auth-token` |
-| `/revoke-sessions` | Always clear |
-| `/revoke-session` | Clear only when the revoked token is the caller's current session |
-| `/revoke-other-sessions` | No clear (current session remains valid) |
-
-Cookie attributes mirror issuance via Better Auth's `createAuthCookie`. Header-mode clients must still drop any locally cached Bearer token.
-
-## 5. Security Fail-Safes & Edge Cases
-
-An implementing engine or agent must explicitly verify and test code logic compliance against the following edge cases:
-
-- **Header Stripping Proximity:** When operating in `cookie` placement mode, any pre-existing cookie strings injected by the base layers of `better-auth` must be parsed out and completely omitted from output headers during execution tracking hooks. This forces clients to carry only the SCJWT cookie (default name: `auth-token`).
-    
-- **Context Resolution Bridging:** Setting `context.session = dbSession` during the pipeline sequence ensures compatibility with other native plugins or core application APIs (like calling `auth.api.getSession()`). This mapping prevents downstream plugins from failing due to empty context assumptions.
-    
-- **Graceful Failure Fall-Through:** If the extraction phase returns no tokens from headers or cookies, the pipeline must exit smoothly using a clear return statement without throwing errors. This allows non-authenticated public routes (e.g., viewing public documentation or pricing pages) to render correctly.
-
-## 6. Build & publish
-
-The npm package is built with **tsdown** (not `tsc` or `bun build`):
-
-- **Entries:** `src/index.ts` (server exports), `src/client.ts` (client plugin)
-- **Output:** `dist/*.mjs`, `dist/*.d.mts`
-- **Externals:** `better-auth`, `better-auth/client`, `jose` (peer dependencies, never bundled)
-- **Scripts:** `bun run build` (tsdown), `prepublishOnly` runs build before publish
-
-Tests live in `test/` at the project root (`bun test`). Integration tests may use Better Auth [test-utils](https://better-auth.com/docs/plugins/test-utils) via a test-only auth instance.
+The build must emit declarations for both package entrypoints. The test suite must prove native `getSession`, cookie/header delivery, effective expiry, callback issuance, 2xx-only replacement, dynamic claims, fingerprint revocation, storage invariants, and admin revocation.

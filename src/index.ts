@@ -1,3 +1,9 @@
 export { scjwt } from "./plugin/index";
-export { scjwtClient } from "./client";
-export type { ScjwtJwtPayload, ScjwtOptions } from "./plugin/types";
+export type {
+	FingerprintMode,
+	JsonValue,
+	ScjwtClaimContext,
+	ScjwtJwtPayload,
+	ScjwtOptions,
+	TokenPlacement,
+} from "./plugin/types";

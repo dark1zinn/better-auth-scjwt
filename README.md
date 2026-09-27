@@ -1,52 +1,48 @@
 # better-auth-scjwt
 
-Session-Centric JWT (SCJWT) plugin for [Better Auth](https://better-auth.com). It issues a signed, device-fingerprinted JWT that points at a database session row. The database remains the source of truth; the JWT is a tamper-proof pointer with a bounded lifetime.
-
-See why in [the docs](./docs)
+Session-Centric JWT transport for [Better Auth](https://better-auth.com). The plugin replaces the client-visible session token with an HS256 JWT while keeping the Better Auth database session row authoritative. Deleting or expiring that row invalidates the JWT on its next use.
 
 ## Install
 
 ```bash
-bun add better-auth-scjwt
-# peer dependencies (if not already installed)
-bun add better-auth jose
+bun add better-auth-scjwt better-auth @better-auth/core jose
 ```
 
-**Peer dependencies:** `better-auth` `>=1.0.0`, `jose` `>=5.0.0`
+Supported peer ranges:
 
-## Quick start
+- `better-auth` and `@better-auth/core`: `^1.7.6`
+- `jose`: `^6.2.12`
 
-### Server
+## Server setup
 
 ```ts
 import { betterAuth } from "better-auth";
 import { scjwt } from "better-auth-scjwt";
 
 export const auth = betterAuth({
-  // database adapter required — sessions are stored in DB
-  database: /* your adapter */,
-  plugins: [
-    scjwt({
-      jwtSecret: process.env.JWT_SECRET!,
-      issuer: "https://api.example.com",
-    }),
-  ],
+  database: yourAdapter,
+  baseURL: "https://api.example.com",
+  secret: process.env.BETTER_AUTH_SECRET,
+  plugins: [scjwt()],
 });
 ```
 
-A Better Auth `database` adapter is required. SCJWT stores the canonical session state in the database, so stateless/no-database setups are not supported and fail fast with:
+`scjwt()` uses Better Auth's resolved secret, authentication base URL, native session lifetime, cookies, and refresh policy. It does not require a second signing key or issuer.
 
-```txt
-[scjwt] database adapter is required; stateless mode is not supported.
+A database is mandatory. When `secondaryStorage` is configured, set `session.storeSessionInDatabase: true` so the canonical row remains immediately revocable:
+
+```ts
+betterAuth({
+  database: yourAdapter,
+  secondaryStorage: yourSecondaryStore,
+  session: { storeSessionInDatabase: true },
+  plugins: [scjwt()],
+});
 ```
 
-After a successful `/sign-in/*` or `/sign-up/*` flow, the plugin:
+Secondary-storage-only sessions fail during initialization.
 
-1. Signs an HS256 JWT bound to the new session row
-2. Strips native Better Auth session cookies from the response
-3. Delivers the JWT via cookie (default) or response header
-
-### Client
+## Client setup
 
 ```ts
 import { createAuthClient } from "better-auth/client";
@@ -58,78 +54,139 @@ export const authClient = createAuthClient({
 });
 ```
 
-The client plugin provides `$InferServerPlugin` type inference only. Token refresh is handled server-side (see [Sliding session](#sliding-session)).
+The client plugin supplies Better Auth type inference. Import it from `better-auth-scjwt/client`; it is intentionally not re-exported by the server entrypoint.
 
 ## Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `jwtSecret` | `string` | — | **Required.** HS256 signing key |
-| `issuer` | `string` | — | **Required.** Issuer URL (`iss` claim) |
-| `expiresInSeconds` | `number` | `3600` | JWT and session validity window (seconds) |
-| `cookieName` | `string` | `"auth-token"` | HTTP-only cookie name when `tokenPlacement` is `"cookie"` |
-| `tokenPlacement` | `"cookie"` \| `"header"` | `"cookie"` | How the JWT is delivered and read |
-| `slidingSession` | `boolean` | `false` | Re-sign JWT for active users before expiry (see below) |
-
-### Token placement
-
-**`cookie` (default)** — JWT is set as an HTTP-only cookie (`auth-token` by default). The gateway reads it from the `Cookie` header on each request.
-
-**`header`** — JWT is returned in the `set-auth-token` response header on issuance/refresh. Clients send it back via `Authorization: Bearer <token>`.
-
-## Sliding session
-
-Sliding refresh is **disabled by default** (`slidingSession: false`). When disabled, sessions end at JWT `exp` or when the database row is revoked—whichever applies first.
-
-Enable it to keep actively used sessions alive:
-
 ```ts
-scjwt({
-  jwtSecret: process.env.JWT_SECRET!,
-  issuer: "https://api.example.com",
-  slidingSession: true,
-})
+interface ScjwtOptions {
+  tokenPlacement?: "cookie" | "header";
+  fingerprintMode?: "strict" | "ip-only";
+  getCustomClaims?: (context: {
+    session: Session;
+    user: User;
+    request: Request | undefined;
+  }) => Awaitable<Record<string, JsonValue>>;
+}
 ```
 
-When enabled, requests within the last **20%** of the token lifetime trigger:
+| Option | Default | Behavior |
+|---|---|---|
+| `tokenPlacement` | `"cookie"` | Selects the only accepted and emitted SCJWT transport. |
+| `fingerprintMode` | `"strict"` | `strict` binds IP, User-Agent, and `Sec-CH-UA-Platform`; `ip-only` binds only IP. |
+| `getCustomClaims` | unset | Resolves visible signed JSON claims at issuance, refresh, and verification. |
 
-1. Extension of the database session `expiresAt`
-2. Re-signing of the JWT
-3. Delivery of the new token on the response (`onResponse`)
+### Cookie placement
 
-Better Auth's built-in `session.updateAge` refresh does **not** update SCJWT tokens. If you use `slidingSession: true`, disable the native session refresh to avoid conflicting behavior:
+Cookie placement uses the resolved Better Auth session-cookie name and attributes, including `advanced.cookiePrefix`, custom cookie names, and the effective `__Secure-` prefix. The plugin replaces only a live native session-token `Set-Cookie` value with the SCJWT. Native session-data, account-data, and clearing cookies remain intact.
+
+Send the cookie unchanged on subsequent Better Auth requests. The before hook verifies the SCJWT, resolves its backing row, signs the row's opaque `session.token` as a request-only Better Auth cookie, and lets the normal Better Auth endpoint or middleware consume it.
+
+### Header placement
+
+Header placement emits:
+
+```http
+set-auth-token: <SCJWT>
+Access-Control-Expose-Headers: set-auth-token
+```
+
+Send the value back as:
+
+```http
+Authorization: Bearer <SCJWT>
+```
+
+Live native session-token, session-data, and `dontRemember` cookies are removed from successful issuance responses; account and clearing cookies are preserved. Header clients must remove their locally stored Bearer token after logout or revocation because a server cannot clear client-managed authorization state.
+
+The configured placement is authoritative. Cookie mode ignores `Authorization`; header mode ignores the session cookie. This makes requests containing both transports deterministic.
+
+## Native session lifecycle
+
+SCJWT issuance follows `ctx.context.newSession`, not a path allowlist. It therefore covers credential sign-in/sign-up, social callbacks, passwordless plugins, passkeys, impersonation, and any plugin that uses Better Auth's `setSessionCookie`, including successful Better Auth redirects. API errors with status 400 or higher and non-2xx `Response` objects never receive a replacement SCJWT and expire native session cookies when the request established a new session. Unrelated failures that did not establish a session leave existing cookies intact.
+
+Better Auth owns refresh timing:
 
 ```ts
 betterAuth({
   session: {
-    disableSessionRefresh: true,
+    expiresIn: 60 * 60 * 24 * 7,
+    updateAge: 60 * 60 * 24,
   },
-  plugins: [scjwt({ /* ... */, slidingSession: true })],
+  plugins: [scjwt()],
 });
 ```
 
-## JWT payload
+When Better Auth refreshes a native session and sets `newSession`, SCJWT is reissued in the configured transport. There is no plugin-specific sliding-session threshold or competing database update.
 
-Strict v1 payload (no extra claims):
+Token expiration is capped to:
 
-| Claim | Description |
-|-------|-------------|
-| `iss` | Issuer URL from plugin options |
-| `sub` | `user:{userId}` |
-| `fp` | SHA-256 hex fingerprint of `{ ip, ua, platform }` |
-| `iat` / `exp` | Issued-at and expiry (Unix seconds) |
-| `sid` | Database session row primary key |
+```txt
+min(database session.expiresAt, issuedAt + Better Auth session.expiresIn)
+```
+
+## JWT payload and key rotation
+
+The core payload is:
+
+| Claim | Meaning |
+|---|---|
+| `iss` | Resolved Better Auth authentication base URL. |
+| `sub` | `user:{session.userId}`. |
+| `fp` | Lowercase SHA-256 fingerprint. |
+| `iat`, `exp` | Unix issuance and effective-expiry seconds. |
+| `sid` | Canonical Better Auth session-row ID. |
+
+With a single Better Auth `secret`, SCJWT signs directly with that secret. With Better Auth `secrets`, new tokens carry the current secret version as `kid`; verification accepts current and retained versions.
+
+Without `getCustomClaims`, every extra payload key is rejected. With a resolver, custom claims must:
+
+- be a plain JSON object with at most 16 top-level keys;
+- serialize to at most 1024 UTF-8 bytes;
+- contain no values deeper than eight containers;
+- contain only finite numbers, strings, booleans, null, arrays, and plain objects;
+- not use `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `fp`, or `sid`.
+
+The resolver runs again after the session and user are loaded. Presented custom claims must deep-equal the current result. Custom-claim and device-fingerprint mismatches reject the token without deleting its shared backing session.
+
+## IP and proxy configuration
+
+SCJWT uses Better Auth 1.7's `getIP`. Configure proxy trust only through Better Auth:
+
+```ts
+betterAuth({
+  advanced: {
+    ipAddress: {
+      ipAddressHeaders: ["x-forwarded-for"],
+      trustedProxies: ["192.0.2.10", "10.0.0.0/24"],
+      ipv6Subnet: 64,
+    },
+  },
+  plugins: [scjwt()],
+});
+```
+
+Do not trust forwarding headers from origins directly reachable by clients. `ip-only` relaxes browser-header binding; it does not disable IP binding.
 
 ## Security model
 
-- **Effective expiry** — Session validity uses `min(JWT exp, database expiresAt)`. At issuance, JWT lifetime is capped to the session row's `expiresAt`; at validation, `loadSessionIntoContext` rejects when past effective expiry (`"Session has expired."`).
-- **Database as source of truth** — Revoking or deleting the session row invalidates the JWT immediately on the next gateway request (`401`, `"Session not found."`). SCJWT does not maintain a separate revocation list.
-- **Revocation via Better Auth** — When Better Auth deletes the session row, SCJWT is dead. Verified core paths (Better Auth v1.6.14): `signOut`, `revokeSession`, `revokeOtherSessions`, and `changePassword` with `revokeOtherSessions: true`. Full audit: [`docs/REVOKE_AUDIT.md`](./docs/REVOKE_AUDIT.md).
-- **Host configuration matters** — `changePassword` does **not** delete session rows by default; other devices keep valid SCJWTs until `exp` unless you pass `revokeOtherSessions: true`. For password reset, enable `emailAndPassword.revokeSessionsOnPasswordReset` if all sessions should end.
-- **Client token clearing** — On `signOut`, `revokeSessions`, and `revokeSession` when the current session is revoked, SCJWT clears the cookie (`Max-Age=0`) or removes `set-auth-token`. `revokeOtherSessions` does not clear the current client's token (other devices' JWTs are invalidated server-side only). Header-mode clients should still drop any locally cached Bearer token.
-- **Device binding** — Each token embeds a fingerprint (`fp`) derived from client IP, User-Agent, and `Sec-CH-UA-Platform`. A mismatch is treated as compromise: the session row is deleted and the request returns `401`.
-- **Fail-closed** — Invalid, expired, or mismatched tokens reject the request; missing tokens fall through to standard Better Auth handling.
-- **Opaque payload** — No user profile data in the JWT; only the session pointer and fingerprint.
+- Signature, issuer, expiry, payload shape, session subject, database expiry, fingerprint, and configured custom claims are checked before native session injection.
+- Missing SCJWT falls through to ordinary Better Auth handling. A present invalid SCJWT returns Better Auth's standard `401 UNAUTHORIZED` response.
+- Session deletion is immediate revocation; there is no SCJWT blocklist.
+- Fingerprint mismatch returns `401` without deleting the session, preventing a mismatched bearer from terminating the shared session.
+- Custom-claim mismatch returns `401` without deleting the session.
+- Revocation audit: [`docs/REVOKE_AUDIT.md`](./docs/REVOKE_AUDIT.md).
+
+## Migration from 0.0.x
+
+1. Remove `jwtSecret`, `issuer`, `expiresInSeconds`, `cookieName`, and `slidingSession` from `scjwt()`.
+2. Configure signing, issuer, lifetime, and refresh through Better Auth's `secret`/`secrets`, `baseURL`, and `session` options.
+3. Replace any hard-coded `auth-token` cookie handling with Better Auth's resolved session-cookie name, normally `better-auth.session_token` or its secure-prefixed form.
+4. If `secondaryStorage` is enabled, add `session.storeSessionInDatabase: true`.
+5. Move client imports to `better-auth-scjwt/client` if they previously used the root package.
+6. Header clients must expose/read `set-auth-token` and clear their stored Bearer token after logout.
+
+This is a clean cutover; removed options and the old cookie name have no compatibility aliases.
 
 ## Development
 
@@ -139,13 +196,8 @@ bun test
 bun run build
 ```
 
-Tests live in `test/` at the project root. Integration tests use Better Auth's [test-utils plugin](https://better-auth.com/docs/plugins/test-utils) via a test-only auth instance.
-
-## Compatibility notes
-
-- **Issuance paths:** JWT delivery hooks run after `/sign-in/*` and `/sign-up/*`. OAuth, magic-link, and other session-creating flows are not covered yet.
-- **Reverse proxies:** Fingerprint uses the request IP as seen by Better Auth (`getIp`). Clients behind proxies may need consistent IP extraction configuration.
+The integration suite exercises real Better Auth endpoints with the memory adapter and test-utils plugin.
 
 ## License
 
-[MIT](./LICENCE)
+[MIT](./LICENSE)
