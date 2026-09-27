@@ -39,3 +39,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Docs
 issues/
+
+# framework example state
+examples/*/data/
+examples/*/test/.data/
