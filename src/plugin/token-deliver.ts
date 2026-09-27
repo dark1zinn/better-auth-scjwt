@@ -89,7 +89,7 @@ function isLiveCookie(attributes: {
 	return !attributes.expires || attributes.expires.getTime() > Date.now();
 }
 
-function isHeaderOnlyNativeCookie(
+export function isHeaderOnlyNativeCookie(
 	name: string,
 	authCookies: BetterAuthCookies,
 ): boolean {

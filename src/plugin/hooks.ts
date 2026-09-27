@@ -1,6 +1,6 @@
-import type { AuthContext, Session } from "better-auth";
+import type { AuthContext, BetterAuthPlugin, Session } from "better-auth";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
-import { setRequestCookie } from "better-auth/cookies";
+import { parseCookies, setRequestCookie } from "better-auth/cookies";
 import { serializeSignedCookie } from "better-call";
 import { computeFingerprint } from "./fingerprint";
 import {
@@ -12,7 +12,10 @@ import {
 	type CustomClaims,
 } from "./jwt";
 import { getRequestFingerprintInput } from "./request-context";
-import { deliverSessionToken } from "./token-deliver";
+import {
+	deliverSessionToken,
+	isHeaderOnlyNativeCookie,
+} from "./token-deliver";
 import { extractToken } from "./token-extract";
 import type {
 	ResolvedScjwtOptions,
@@ -20,7 +23,9 @@ import type {
 	ScjwtJwtPayload,
 } from "./types";
 
-export function createScjwtHooks(options: ResolvedScjwtOptions) {
+export function createScjwtHooks(
+	options: ResolvedScjwtOptions,
+): NonNullable<BetterAuthPlugin["hooks"]> {
 	return {
 		before: [
 			{
@@ -34,6 +39,15 @@ export function createScjwtHooks(options: ResolvedScjwtOptions) {
 						headers: sourceHeaders,
 					});
 					if (!token) {
+						if (options.tokenPlacement === "header") {
+							const headers = stripNativeSessionCookies(
+								sourceHeaders,
+								ctx.context.authCookies,
+							);
+							if (headers) {
+								return { context: { headers } };
+							}
+						}
 						return;
 					}
 
@@ -183,6 +197,39 @@ export function createScjwtHooks(options: ResolvedScjwtOptions) {
 			},
 		],
 	};
+}
+
+function stripNativeSessionCookies(
+	sourceHeaders: Headers,
+	authCookies: AuthContext["authCookies"],
+): Headers | null {
+	const cookieHeader = sourceHeaders.get("cookie");
+	if (!cookieHeader) {
+		return null;
+	}
+	const cookies = parseCookies(cookieHeader);
+	let removed = false;
+	for (const name of cookies.keys()) {
+		if (isHeaderOnlyNativeCookie(name, authCookies)) {
+			cookies.delete(name);
+			removed = true;
+		}
+	}
+	if (!removed) {
+		return null;
+	}
+	const headers = new Headers(sourceHeaders);
+	if (cookies.size === 0) {
+		headers.set("cookie", "");
+	} else {
+		headers.set(
+			"cookie",
+			[...cookies]
+				.map(([name, value]) => `${name}=${encodeURIComponent(value)}`)
+				.join("; "),
+		);
+	}
+	return headers;
 }
 
 async function verifyRequestToken(

@@ -5,7 +5,7 @@ import { memoryAdapter } from "better-auth/adapters/memory";
 import { APIError, createAuthEndpoint } from "better-auth/api";
 import { parseSetCookieHeader, setSessionCookie } from "better-auth/cookies";
 import { testUtils } from "better-auth/plugins";
-import type { EndpointContext } from "better-call";
+import { serializeSignedCookie, type EndpointContext } from "better-call";
 import { decodeJwt } from "jose";
 import { scjwt } from "../src/plugin/index";
 import {
@@ -49,6 +49,14 @@ function createCallbackFixture(getUserId: () => string): BetterAuthPlugin {
 				async (ctx) => {
 					await establishSession(ctx);
 					throw APIError.fromStatus("BAD_REQUEST");
+				},
+			),
+			callbackResponseFailureFixture: createAuthEndpoint(
+				"/callback-fixture-response-failure",
+				{ method: "POST" },
+				async (ctx) => {
+					await establishSession(ctx);
+					return new Response("callback failed", { status: 422 });
 				},
 			),
 		},
@@ -124,8 +132,9 @@ describe("native Better Auth session transport", () => {
 	});
 
 	test("uses header placement exclusively and exposes the replacement header once", async () => {
+		const db = createMemoryDB();
 		const auth = betterAuth({
-			database: memoryAdapter(createMemoryDB()),
+			database: memoryAdapter(db),
 			baseURL: TEST_BASE_URL,
 			secret: TEST_SECRET,
 			emailAndPassword: { enabled: true },
@@ -152,6 +161,20 @@ describe("native Better Auth session transport", () => {
 		headers.set("cookie", `${issued.cookieName}=ignored.invalid.cookie`);
 		const response = await requestSession(auth, headers);
 		expect(await response.json()).toMatchObject({ user: { email: "header@example.com" } });
+
+		const serializedNativeCookie = await serializeSignedCookie(
+			"",
+			db.session[0].token,
+			context.secret,
+		);
+		const nativeSessionCookie = decodeURIComponent(
+			serializedNativeCookie.replace("=", ""),
+		);
+		const cookieOnlyResponse = await requestSession(
+			auth,
+			createCookieHeaders(issued.cookieName, nativeSessionCookie),
+		);
+		expect(await cookieOnlyResponse.json()).toBeNull();
 	});
 
 	test("cookie placement ignores an Authorization token", async () => {
@@ -188,7 +211,7 @@ describe("native Better Auth session transport", () => {
 		expect(response.status).toBe(401);
 	});
 
-	test("issues from callback-style newSession and skips failed responses", async () => {
+	test("issues from callback-style newSession", async () => {
 		let fixtureUserId = "";
 		const fixture = createCallbackFixture(() => fixtureUserId);
 		const auth = betterAuth({
@@ -203,28 +226,54 @@ describe("native Better Auth session transport", () => {
 		);
 		fixtureUserId = user.id;
 
-		const success = await auth.handler(
+		const response = await auth.handler(
 			new Request(`${TEST_BASE_URL}/api/auth/callback-fixture`, {
 				method: "POST",
 				headers: STABLE_HEADERS,
 			}),
 		);
-		const successCookie = parseSetCookieHeader(
-			success.headers.get("set-cookie") ?? "",
+		const sessionCookie = parseSetCookieHeader(
+			response.headers.get("set-cookie") ?? "",
 		).get(context.authCookies.sessionToken.name);
-		expect(success.status).toBe(200);
-		expect(successCookie?.value.split(".")).toHaveLength(3);
+		expect(response.status).toBe(200);
+		expect(sessionCookie?.value.split(".")).toHaveLength(3);
+	});
 
-		const failure = await auth.handler(
-			new Request(`${TEST_BASE_URL}/api/auth/callback-fixture-failure`, {
-				method: "POST",
-				headers: STABLE_HEADERS,
-			}),
-		);
-		const failureCookie = parseSetCookieHeader(
-			failure.headers.get("set-cookie") ?? "",
-		).get(context.authCookies.sessionToken.name);
-		expect(failure.status).toBe(400);
-		expect(failureCookie?.value.split(".").length).not.toBe(3);
+	test("skips callback issuance for API errors and non-2xx responses", async () => {
+		for (const tokenPlacement of ["cookie", "header"] as const) {
+			let fixtureUserId = "";
+			const fixture = createCallbackFixture(() => fixtureUserId);
+			const auth = betterAuth({
+				database: memoryAdapter(createMemoryDB()),
+				baseURL: TEST_BASE_URL,
+				secret: TEST_SECRET,
+				plugins: [testUtils(), fixture, scjwt({ tokenPlacement })],
+			});
+			const context = await auth.$context;
+			const user = await context.test.saveUser(
+				context.test.createUser({
+					email: `${tokenPlacement}-callback-failure@example.com`,
+				}),
+			);
+			fixtureUserId = user.id;
+
+			for (const [path, status] of [
+				["callback-fixture-failure", 400],
+				["callback-fixture-response-failure", 422],
+			] as const) {
+				const response = await auth.handler(
+					new Request(`${TEST_BASE_URL}/api/auth/${path}`, {
+						method: "POST",
+						headers: STABLE_HEADERS,
+					}),
+				);
+				const sessionCookie = parseSetCookieHeader(
+					response.headers.get("set-cookie") ?? "",
+				).get(context.authCookies.sessionToken.name);
+				expect(response.status).toBe(status);
+				expect(sessionCookie?.value.split(".")).not.toHaveLength(3);
+				expect(response.headers.get("set-auth-token")).toBeNull();
+			}
+		}
 	});
 });
