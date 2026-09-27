@@ -1,35 +1,93 @@
-### A Session-Centric JWT (or Stateful JWT) is a hybrid authentication model. It uses JSON Web Tokens for client-side API statelessness, but pairs them with server-side session tracking (like Redis or a database) to retain the security and control advantages of traditional session-based auth.
+# Native Session-Centric JWT architecture
 
-## Why Use a Hybrid Approach?
+A Session-Centric JWT is a signed client transport for a server-side session, not a stateless replacement for one. `better-auth-scjwt` signs the Better Auth session-row ID and device constraints into a JWT while preserving Better Auth's database as the only authorization source of truth.
 
-Pure "stateless JWTs" have a major flaw: inability to be revoked. If a token is stolen, the server has no way to invalidate it before it expires. Session-centric JWTs solve this by tracking key session data on the server.
+## Why retain a session row?
 
-## How It Works
+A purely stateless access token remains usable until its cryptographic expiry unless the application adds a revocation list. A canonical session row provides immediate revocation through the same operations Better Auth already uses for sign-out, password security, administration, and user deletion.
 
-- **Initial Login:** The server validates credentials and generates a short-lived Access Token (JWT) and a unique session_id.
+SCJWT intentionally performs a database read for each presented token. The JWT protects the pointer and selected claims from tampering; it does not remove the authoritative lookup.
 
-- **Payload State:** The JWT payload contains standard claims along with the specific session_id and a version identifier.
+| Property | Stateless JWT | Opaque database session | SCJWT |
+|---|---|---|---|
+| Client-verifiable structure | Yes | No | Yes |
+| Immediate revocation | Requires extra state | Yes | Yes |
+| Authoritative lookup per request | No | Yes | Yes |
+| Device binding in credential | Optional | External | Built in |
+| Better Auth native endpoint compatibility | Separate integration | Native | Native after verified request-cookie injection |
 
-- **Request Validation:** With every API call, the server decodes the JWT and queries its server-side cache (e.g., Redis) to check if the session is still active and valid.
+## Request flow
 
-- **Revocation:** If a user logs out, their password gets compromised, or the device is lost, the server deletes that session_id from the cache. The next API request using the associated JWT is immediately rejected.
+```mermaid
+flowchart TD
+  A[Configured cookie or Bearer token] --> B[Verify HS256, kid, issuer, exp, and payload]
+  B --> C[Load session row by sid]
+  C --> D[Check subject and effective expiry]
+  D --> E[Recompute fingerprint]
+  E -->|Mismatch| F[Delete backing session and return 401]
+  E -->|Match| G[Load user and recompute custom claims]
+  G -->|Mismatch| H[Keep session and return 401]
+  G -->|Match| I[Sign opaque session.token as request-only Better Auth cookie]
+  I --> J[Run normal Better Auth endpoint and middleware]
+```
 
-## Architecture Comparison
+The injected cookie never replaces the response transport. It exists only in the current request headers so Better Auth's native `getSession`, sensitive-session middleware, account endpoints, and third-party plugins follow their standard path.
 
-| Feature     | Traditional Stateless JWT                      | Traditional Session                  | Session-Centric JWT                                  |
-|-------------|------------------------------------------------|--------------------------------------|------------------------------------------------------|
-| Revocation  | Impossible (must wait for expiration)          | Instant (delete from server)         | Instant (remove session ID from server)              |
-| Scalability | High (no database hits for every request)      | Medium (requires shared state across servers) | High (JWT carries the bulk of data; Redis cache keeps checks fast) |
-| Security    | Low (risk of stolen tokens)                    | High (server manages state)          | High (best of both worlds)                           |
+## Issuance and refresh flow
 
-For a visual breakdown of how stateless (pure JWT) and stateful (session) authentications differ in their routing and flow: https://www.youtube.com/watch?v=fyTxwIa-1U0
+Better Auth's `setSessionCookie` records `ctx.context.newSession`. A generic after hook signs SCJWT whenever that value is present on a successful response. No endpoint names are assumed, so OAuth callbacks, magic links, passkeys, impersonation, and custom plugins receive the same behavior as email/password routes.
 
-## Revoke path audit
+Better Auth `session.expiresIn` caps token lifetime. Better Auth `session.updateAge` controls refresh. A native refresh sets `newSession`, and the after hook emits a replacement SCJWT only for a successful 2xx result.
 
-Better Auth session revocation vs SCJWT invalidation: [REVOKE_AUDIT.md](./REVOKE_AUDIT.md)
+## Transport behavior
 
-## Learn more
+### Cookie
 
-- [Why pure JWTs are dangerous and how to pair it with sessions for security](https://redis.io/blog/json-web-tokens-jwt-are-dangerous-for-user-sessions/)
-- [A robust authentication system](https://dev.to/titre123/creating-a-robust-authentication-system-harnessing-the-power-of-jwt-and-session-authentication-2efc)
-- [Maintaining a session using JWT](https://medium.com/@hafizsheetab/maintaining-a-session-for-your-restful-apis-using-jwt-and-redis-a3a4aff6b470)
+- Reads only `ctx.context.authCookies.sessionToken.name`.
+- Replaces only a live native session-token response cookie.
+- Preserves Better Auth's exact resolved name, secure prefix, path, domain, SameSite, HttpOnly, expiry, and partitioned attributes.
+- Preserves session-data, account-data, and clear-cookie entries.
+
+### Header
+
+- Reads only `Authorization: Bearer`.
+- Emits `set-auth-token` and exposes it through CORS exactly once.
+- Removes live session-token, session-data, and `dontRemember` cookies.
+- Preserves account-data and clear-cookie entries.
+- Requires the client to delete stored Bearer state after logout or revocation.
+
+Transport selection also defines precedence. The unselected source is ignored rather than used as a fallback.
+
+## Claims
+
+Core claims are `iss`, `sub`, `fp`, `iat`, `exp`, and `sid`. `getCustomClaims` may add bounded JSON values. The resolver receives the authoritative session and user plus the current `Request` when one exists.
+
+Custom claims are visible signed data, not encrypted profile storage. The implementation limits count, encoded size, nesting, types, and reserved names. Verification reruns the resolver and requires exact JSON equality. This turns current roles or entitlements into short-lived assertions without creating a second revocation database.
+
+## Fingerprints and proxies
+
+`strict` mode hashes Better Auth's resolved IP, User-Agent, and `Sec-CH-UA-Platform`. `ip-only` hashes the same IP with canonical empty browser fields. Missing optional browser headers are therefore deterministic.
+
+IP selection is delegated to Better Auth's `advanced.ipAddress.ipAddressHeaders`, `trustedProxies`, and `ipv6Subnet`. Keeping one resolver avoids divergent rate-limit, session-tracking, and SCJWT identities.
+
+## Storage invariant
+
+SCJWT must be able to resolve and delete a canonical database row immediately. Initialization rejects:
+
+- configurations without a Better Auth database;
+- `secondaryStorage` configurations unless `session.storeSessionInDatabase: true`.
+
+This is deliberate. A secondary-store-only cache cannot satisfy the plugin's database-backed revocation contract.
+
+## Key rotation
+
+Plain Better Auth `secret` produces an HS256 token without `kid`. Better Auth versioned `secrets` produces a token with the current version in `kid`. Verification selects that exact retained version, allowing rotation without accepting unknown key IDs.
+
+## Verification inventory
+
+- `test/native-session.test.ts`: cookie/header transport, native `getSession`, custom secure prefixes, precedence, callback issuance, failure suppression, core sign-out.
+- `test/custom-claims.test.ts`: issuance/refresh resolver calls, JSON limits, strict default payload, dynamic mismatch, secret rotation.
+- `test/fingerprint-mode.test.ts`: missing headers, strict mismatch revocation, IP-only behavior, trusted proxies.
+- `test/secondary-storage.test.ts`: database and secondary-storage initialization invariants.
+- `test/admin-revoke-paths.test.ts`: Better Auth admin ban and session-revoke paths.
+- [`REVOKE_AUDIT.md`](./REVOKE_AUDIT.md): Better Auth 1.7.6 deletion-path audit.
