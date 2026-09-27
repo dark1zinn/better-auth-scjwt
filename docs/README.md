@@ -24,7 +24,7 @@ flowchart TD
   B --> C[Load session row by sid]
   C --> D[Check subject and effective expiry]
   D --> E[Recompute fingerprint]
-  E -->|Mismatch| F[Delete backing session and return 401]
+  E -->|Mismatch| F[Keep session and return 401]
   E -->|Match| G[Load user and recompute custom claims]
   G -->|Mismatch| H[Keep session and return 401]
   G -->|Match| I[Sign opaque session.token as request-only Better Auth cookie]
@@ -37,7 +37,7 @@ The injected cookie never replaces the response transport. It exists only in the
 
 Better Auth's `setSessionCookie` records `ctx.context.newSession`. A generic after hook signs SCJWT whenever that value is present on a successful response. No endpoint names are assumed, so OAuth callbacks, magic links, passkeys, impersonation, and custom plugins receive the same behavior as email/password routes.
 
-Better Auth `session.expiresIn` caps token lifetime. Better Auth `session.updateAge` controls refresh. A native refresh sets `newSession`, and the after hook emits a replacement SCJWT only for a successful 2xx result.
+Better Auth `session.expiresIn` caps token lifetime. Better Auth `session.updateAge` controls refresh. A native refresh sets `newSession`, and the after hook emits a replacement SCJWT only for a successful 2xx result. Failed results expire native session cookies accumulated before the failure.
 
 ## Transport behavior
 

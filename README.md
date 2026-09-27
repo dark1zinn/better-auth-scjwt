@@ -103,7 +103,7 @@ The configured placement is authoritative. Cookie mode ignores `Authorization`; 
 
 ## Native session lifecycle
 
-SCJWT issuance follows `ctx.context.newSession`, not a path allowlist. It therefore covers credential sign-in/sign-up, social callbacks, passwordless plugins, passkeys, impersonation, and any plugin that uses Better Auth's `setSessionCookie`. Failed and non-2xx responses never receive a replacement SCJWT.
+SCJWT issuance follows `ctx.context.newSession`, not a path allowlist. It therefore covers credential sign-in/sign-up, social callbacks, passwordless plugins, passkeys, impersonation, and any plugin that uses Better Auth's `setSessionCookie`. Failed and non-2xx responses never receive a replacement SCJWT and expire native session cookies accumulated before the failure.
 
 Better Auth owns refresh timing:
 
@@ -147,7 +147,7 @@ Without `getCustomClaims`, every extra payload key is rejected. With a resolver,
 - contain only finite numbers, strings, booleans, null, arrays, and plain objects;
 - not use `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `fp`, or `sid`.
 
-The resolver runs again after the session and user are loaded. The presented custom claims must deep-equal the current result. An authorization-state change therefore rejects a stale token without deleting its session; a device-fingerprint mismatch deletes the backing session as a compromise response.
+The resolver runs again after the session and user are loaded. Presented custom claims must deep-equal the current result. Custom-claim and device-fingerprint mismatches reject the token without deleting its shared backing session.
 
 ## IP and proxy configuration
 
@@ -173,7 +173,7 @@ Do not trust forwarding headers from origins directly reachable by clients. `ip-
 - Signature, issuer, expiry, payload shape, session subject, database expiry, fingerprint, and configured custom claims are checked before native session injection.
 - Missing SCJWT falls through to ordinary Better Auth handling. A present invalid SCJWT returns Better Auth's standard `401 UNAUTHORIZED` response.
 - Session deletion is immediate revocation; there is no SCJWT blocklist.
-- Fingerprint mismatch calls `internalAdapter.deleteSession(session.token)` before returning `401`.
+- Fingerprint mismatch returns `401` without deleting the session, preventing a mismatched bearer from terminating the shared session.
 - Custom-claim mismatch returns `401` without deleting the session.
 - Revocation audit: [`docs/REVOKE_AUDIT.md`](./docs/REVOKE_AUDIT.md).
 

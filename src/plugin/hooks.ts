@@ -1,6 +1,10 @@
 import type { AuthContext, BetterAuthPlugin, Session } from "better-auth";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
-import { parseCookies, setRequestCookie } from "better-auth/cookies";
+import {
+	expireCookie,
+	parseCookies,
+	setRequestCookie,
+} from "better-auth/cookies";
 import { serializeSignedCookie } from "better-call";
 import { computeFingerprint } from "./fingerprint";
 import {
@@ -90,7 +94,6 @@ export function createScjwtHooks(
 						requestFingerprint.platform,
 					);
 					if (payload.fp !== expectedFingerprint) {
-						await ctx.context.internalAdapter.deleteSession(session.token);
 						unauthorized();
 					}
 
@@ -136,13 +139,14 @@ export function createScjwtHooks(
 			{
 				matcher: () => true,
 				handler: createAuthMiddleware(async (ctx) => {
-					if (isAPIError(ctx.context.returned)) {
-						return;
-					}
+					const returned = ctx.context.returned;
 					if (
-						ctx.context.returned instanceof Response &&
-						!ctx.context.returned.ok
+						isAPIError(returned) ||
+						(returned instanceof Response && !returned.ok)
 					) {
+						expireCookie(ctx, ctx.context.authCookies.sessionToken);
+						expireCookie(ctx, ctx.context.authCookies.sessionData);
+						expireCookie(ctx, ctx.context.authCookies.dontRememberToken);
 						return;
 					}
 					const newSession = ctx.context.newSession;

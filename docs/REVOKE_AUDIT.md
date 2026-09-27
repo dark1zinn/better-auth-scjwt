@@ -21,7 +21,7 @@ Audit target: Better Auth 1.7.6 session-deletion paths and the next SCJWT-backed
 | Admin revoke all | `auth.api.revokeUserSessions` | Deletes all target rows | `401` | Automated in `test/admin-revoke-paths.test.ts` |
 | Unban user | `auth.api.unbanUser` | Does not recreate sessions | Old tokens remain invalid | Source-audited; intentionally not treated as revival |
 | Stop impersonating | `auth.api.stopImpersonating` | Deletes impersonation row and restores the admin cookie | Impersonation token `401` | Better Auth 1.7.6 source audit |
-| Fingerprint mismatch | SCJWT before hook | Deletes compromised row through `internalAdapter.deleteSession` | `401` | Automated in `test/fingerprint-mode.test.ts` |
+| Fingerprint mismatch | SCJWT before hook | Keeps row | Mismatched token `401`; correctly bound token remains valid | Automated in `test/fingerprint-mode.test.ts` |
 | Custom-claim mismatch | SCJWT before hook | Keeps row | `401` | Automated in `test/custom-claims.test.ts` |
 
 ## Host configuration

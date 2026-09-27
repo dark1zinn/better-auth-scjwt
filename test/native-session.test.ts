@@ -247,6 +247,7 @@ describe("native Better Auth session transport", () => {
 				database: memoryAdapter(createMemoryDB()),
 				baseURL: TEST_BASE_URL,
 				secret: TEST_SECRET,
+				session: { cookieCache: { enabled: true } },
 				plugins: [testUtils(), fixture, scjwt({ tokenPlacement })],
 			});
 			const context = await auth.$context;
@@ -267,11 +268,19 @@ describe("native Better Auth session transport", () => {
 						headers: STABLE_HEADERS,
 					}),
 				);
-				const sessionCookie = parseSetCookieHeader(
+				const responseCookies = parseSetCookieHeader(
 					response.headers.get("set-cookie") ?? "",
-				).get(context.authCookies.sessionToken.name);
+				);
 				expect(response.status).toBe(status);
-				expect(sessionCookie?.value.split(".")).not.toHaveLength(3);
+				for (const cookieName of [
+					context.authCookies.sessionToken.name,
+					context.authCookies.sessionData.name,
+					context.authCookies.dontRememberToken.name,
+				]) {
+					const cookie = responseCookies.get(cookieName);
+					expect(cookie?.value).toBe("");
+					expect(cookie?.["max-age"]).toBe(0);
+				}
 				expect(response.headers.get("set-auth-token")).toBeNull();
 			}
 		}

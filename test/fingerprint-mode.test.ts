@@ -43,7 +43,7 @@ describe("fingerprint modes", () => {
 			requested: { "user-agent": "agent-a", "sec-ch-ua-platform": '"Windows"' },
 		},
 	]) {
-		test(`strict mode revokes the backing session on ${mismatch.name} mismatch`, async () => {
+		test(`strict mode rejects a ${mismatch.name} mismatch without terminating the session`, async () => {
 			const db = createMemoryDB();
 			const auth = betterAuth({
 				database: memoryAdapter(db),
@@ -64,7 +64,11 @@ describe("fingerprint modes", () => {
 			);
 			const response = await requestSession(auth, headers);
 			expect(response.status).toBe(401);
-			expect(db.session).toHaveLength(0);
+			const matchingResponse = await requestSession(
+				auth,
+				createCookieHeaders(issued.cookieName, issued.token, mismatch.issued),
+			);
+			expect(matchingResponse.status).toBe(200);
 		});
 	}
 
@@ -93,7 +97,7 @@ describe("fingerprint modes", () => {
 		expect(response.status).toBe(200);
 	});
 
-	test("uses Better Auth trusted-proxy resolution and revokes on client IP change", async () => {
+	test("uses Better Auth trusted-proxy resolution without terminating on client IP change", async () => {
 		const db = createMemoryDB();
 		const auth = betterAuth({
 			database: memoryAdapter(db),
@@ -118,6 +122,12 @@ describe("fingerprint modes", () => {
 			}),
 		);
 		expect(response.status).toBe(401);
-		expect(db.session).toHaveLength(0);
+		const matchingResponse = await requestSession(
+			auth,
+			createCookieHeaders(issued.cookieName, issued.token, {
+				"x-forwarded-for": "203.0.113.20, 192.0.2.10",
+			}),
+		);
+		expect(matchingResponse.status).toBe(200);
 	});
 });
