@@ -132,6 +132,39 @@ describe("custom SCJWT claims", () => {
 		});
 	});
 
+	test("treats own prototype names as custom claims without mutating result prototypes", async () => {
+		const claims: Record<string, string> = {
+			toString: "display",
+			constructor: "factory",
+		};
+		Object.defineProperty(claims, "__proto__", {
+			value: "prototype",
+			enumerable: true,
+			configurable: true,
+			writable: true,
+		});
+		const token = await signJwtFromParts({
+			...tokenParts(),
+			customClaims: claims,
+		});
+		const verified = await verifyJwt({
+			token,
+			secretConfig: TEST_SECRET,
+			issuer: TEST_BASE_URL,
+			allowCustomClaims: true,
+		});
+		const extracted = getCustomClaims(verified);
+		expect(Object.getPrototypeOf(extracted)).toBeNull();
+		expect(Object.keys(extracted).sort()).toEqual([
+			"__proto__",
+			"constructor",
+			"toString",
+		]);
+		expect(extracted["__proto__"]).toBe("prototype");
+		expect(extracted["constructor"]).toBe("factory");
+		expect(extracted["toString"]).toBe("display");
+	});
+
 	test("rejects reserved names, non-JSON values, excessive keys, size, and depth", () => {
 		expect(() => validateCustomClaims({ iss: "override" })).toThrow("reserved");
 		expect(() => validateCustomClaims({ aud: "override" })).toThrow("reserved");

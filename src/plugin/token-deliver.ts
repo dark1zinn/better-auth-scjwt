@@ -1,5 +1,6 @@
-import type { BetterAuthCookies, CookieAttributes } from "@better-auth/core";
+import type { BetterAuthCookies } from "@better-auth/core";
 import {
+	type CookieAttributes,
 	parseSetCookieHeader,
 	splitSetCookieHeader,
 	toCookieOptions,

@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { BetterAuthPlugin } from "better-auth";
+import type { AuthContext, BetterAuthPlugin } from "better-auth";
 import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { APIError, createAuthEndpoint } from "better-auth/api";
 import { parseSetCookieHeader, setSessionCookie } from "better-auth/cookies";
 import { testUtils } from "better-auth/plugins";
+import type { EndpointContext } from "better-call";
 import { decodeJwt } from "jose";
 import { scjwt } from "../src/plugin/index";
 import {
@@ -18,7 +19,14 @@ import {
 } from "./helpers/native-auth";
 
 function createCallbackFixture(getUserId: () => string): BetterAuthPlugin {
-	async function establishSession(ctx: Parameters<Parameters<typeof createAuthEndpoint>[2]>[0]) {
+	async function establishSession<Path extends string>(
+		ctx: EndpointContext<
+			Path,
+			{ method: "POST" },
+			AuthContext,
+			Record<string, string | undefined> | undefined
+		>,
+	) {
 		const user = await ctx.context.internalAdapter.findUserById(getUserId());
 		if (!user) throw APIError.fromStatus("NOT_FOUND");
 		const session = await ctx.context.internalAdapter.createSession(user.id);

@@ -116,9 +116,9 @@ export function parseJwtPayload(
 	payload: JWTPayload,
 	allowCustomClaims = false,
 ): ScjwtJwtPayload {
-	const customClaims: Record<string, unknown> = {};
+	const customClaims = Object.create(null) as Record<string, unknown>;
 	for (const key of Object.keys(payload)) {
-		if (!CORE_CLAIMS[key]) {
+		if (!Object.hasOwn(CORE_CLAIMS, key)) {
 			customClaims[key] = payload[key];
 		}
 	}
@@ -141,9 +141,9 @@ export function parseJwtPayload(
 }
 
 export function getCustomClaims(payload: ScjwtJwtPayload): CustomClaims {
-	const customClaims: CustomClaims = {};
+	const customClaims = Object.create(null) as CustomClaims;
 	for (const [key, value] of Object.entries(payload)) {
-		if (!CORE_CLAIMS[key]) {
+		if (!Object.hasOwn(CORE_CLAIMS, key)) {
 			customClaims[key] = value;
 		}
 	}
@@ -161,7 +161,7 @@ export function validateCustomClaims(value: unknown): asserts value is CustomCla
 		);
 	}
 	for (const key of keys) {
-		if (RESERVED_CLAIMS[key]) {
+		if (Object.hasOwn(RESERVED_CLAIMS, key)) {
 			throw new Error(`[scjwt] custom claim "${key}" is reserved.`);
 		}
 		validateJsonValue(value[key], 0, new WeakSet<object>());
