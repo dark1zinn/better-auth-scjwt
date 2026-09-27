@@ -9,6 +9,9 @@
     "csjwt"
   ],
   "type": "module",
+  "workspaces": [
+    "examples/*"
+  ],
   "files": [
     "dist",
     "README.md",
