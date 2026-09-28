@@ -32,6 +32,7 @@
   "scripts": {
     "build": "tsdown",
     "test": "bun test test",
+    "prepare": "bun run build",
     "prepublishOnly": "bun run build"
   },
   "author": "dark1zinn",
