@@ -1,6 +1,6 @@
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const root = join(import.meta.dir, "..");
@@ -12,7 +12,8 @@ const env = {
   BUN_INSTALL_CACHE_DIR: join(temporary, "cache"),
   // bun run adds the checkout's binaries; the consumer must provide its own.
   PATH: (process.env.PATH ?? "").split(delimiter)
-    .filter((entry) => !entry.includes("node_modules")).join(delimiter),
+    .filter((entry) => !(basename(entry) === ".bin" && basename(dirname(entry)) === "node_modules"))
+    .join(delimiter),
   NODE_PATH: "",
 };
 

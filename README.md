@@ -36,6 +36,10 @@ For a new consumer, the relevant `package.json` fields are:
 }
 ```
 
+An explicit `trustedDependencies` array replaces Bun's default trusted-package
+allowlist. Include any packages from that default list whose lifecycle scripts
+your application relies on.
+
 Then run `bun install`. You can append `#<commit-sha>` to the Git URL to pin a
 revision.
 
