@@ -32,7 +32,8 @@
   "scripts": {
     "build": "tsdown",
     "test": "bun test test",
-    "prepare": "bun run build",
+    "check:git-install": "bun run scripts/check-git-install.ts",
+    "prepare": "bun install --frozen-lockfile --ignore-scripts --filter better-auth-scjwt && bun run --bun build",
     "prepublishOnly": "bun run build"
   },
   "author": "dark1zinn",
