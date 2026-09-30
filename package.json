@@ -32,7 +32,6 @@
   "scripts": {
     "build": "tsdown",
     "test": "bun test test",
-    "check:git-install": "bun run scripts/check-git-install.ts",
     "prepare": "bun install --frozen-lockfile --ignore-scripts --filter better-auth-scjwt && bun run --bun build && bunx tsc --emitDeclarationOnly --noEmit false --rootDir src --outDir dist && mv dist/index.d.ts dist/index.d.mts && mv dist/client.d.ts dist/client.d.mts && case \"$PWD\" in */node_modules/*) rm -rf node_modules;; esac",
     "prepublishOnly": "bun run build"
   },

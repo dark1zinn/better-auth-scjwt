@@ -13,36 +13,6 @@ Supported peer ranges:
 - `better-auth` and `@better-auth/core`: `^1.7.6`
 - `jose`: `^6.2.12`
 
-### Installing from Git with Bun
-
-Before running `bun install`, add `better-auth-scjwt` to your application's
-existing `trustedDependencies` array in `package.json`, preserving any entries
-already there. Create the array if it is absent. Bun must trust this Git
-dependency so its `prepare` script can build `dist`, which contains both package
-entrypoints. The script installs the package's build dependencies from its
-lockfile and runs the build with Bun.
-
-For a new consumer, the relevant `package.json` fields are:
-
-```json
-{
-  "dependencies": {
-    "better-auth-scjwt": "git+https://github.com/dark1zinn/better-auth-scjwt.git",
-    "better-auth": "^1.7.6",
-    "@better-auth/core": "^1.7.6",
-    "jose": "^6.2.12"
-  },
-  "trustedDependencies": ["better-auth-scjwt"]
-}
-```
-
-An explicit `trustedDependencies` array replaces Bun's default trusted-package
-allowlist. Include any packages from that default list whose lifecycle scripts
-your application relies on.
-
-Then run `bun install`. You can append `#<commit-sha>` to the Git URL to pin a
-revision.
-
 ## Server setup
 
 ```ts
@@ -224,16 +194,9 @@ This is a clean cutover; removed options and the old cookie name have no compati
 bun install
 bun test
 bun run build
-bun run check:git-install
 ```
 
 The integration suite exercises real Better Auth endpoints with the memory adapter and test-utils plugin.
-
-`check:git-install` requires Git and registry access. It snapshots the current
-working tree into a temporary Git repository without `dist`, installs it with Bun
-in a fresh consumer with `trustedDependencies` configured, and verifies that
-`better-auth-scjwt` and `better-auth-scjwt/client` resolve and import successfully.
-Temporary files and the isolated install cache are removed afterward.
 
 ## License
 
