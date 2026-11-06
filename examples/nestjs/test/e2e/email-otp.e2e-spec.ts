@@ -183,8 +183,10 @@ describe('NestJS email OTP profile', () => {
     const created = await signUp(client, email);
     expectScjwt(created, cookieName);
     const found = await harness.context.internalAdapter.findUserByEmail(email);
-    expect(found).not.toBeNull();
-    await harness.context.internalAdapter.updateUser(found!.user.id, {
+    if (found === null) {
+      throw new Error(`Signed-up user ${email} was not found.`);
+    }
+    await harness.context.internalAdapter.updateUser(found.user.id, {
       emailVerified: false,
     });
     await client.post('/api/auth/email-otp/send-verification-otp', {
