@@ -1,10 +1,10 @@
 # better-auth-scjwt technical specification
 
-This document records the implemented Better Auth 1.7 native-session design. The package exposes `better-auth-scjwt` for the server plugin and `better-auth-scjwt/client` for client-side type inference.
+This document records the implemented native-session design, tested against Better Auth 1.7.18 (peer range `~1.7.18`). The package exposes `better-auth-scjwt` for the server plugin and `better-auth-scjwt/client` for client-side type inference.
 
 ## Invariants
 
-1. **Database authority:** `sid` identifies a Better Auth database session row. Every presented SCJWT must resolve that row before authentication succeeds.
+1. **Lifecycle authority:** `sid` identifies a Better Auth database session row. Every presented SCJWT must resolve that row and then pass Better Auth's lifecycle-aware `internalAdapter.findSession` before authentication succeeds.
 2. **Immediate revocation:** a deleted or expired row makes the next SCJWT request unauthorized.
 3. **Native compatibility:** verified requests are converted into a correctly signed Better Auth session cookie and continue through the standard endpoint pipeline.
 4. **Single configuration source:** Better Auth owns secrets, issuer/base URL, session lifetime, refresh timing, cookie settings, and proxy/IP resolution.
@@ -29,7 +29,7 @@ Defaults are cookie placement and strict fingerprinting. There are no plugin-loc
 
 ## Initialization
 
-`init` rejects missing database configuration. It also rejects `secondaryStorage` unless `session.storeSessionInDatabase` is `true`. This ensures `adapter.findOne({ model: "session", where: [{ field: "id", value: sid }] })` has an immediately revocable source of truth.
+`init` rejects missing database configuration. It also rejects `secondaryStorage` unless `session.storeSessionInDatabase` is `true`. The durable row is what maps a public `sid` to the opaque native token; `internalAdapter.findSession` then applies secondary-storage liveness, revocation, and `preserveSessionInDatabase` semantics.
 
 The plugin is registered in `@better-auth/core`'s `BetterAuthPluginRegistry` and publishes the user options on the plugin object.
 
@@ -39,11 +39,16 @@ For every endpoint:
 
 1. Read the SCJWT from the selected Better Auth session cookie or Bearer header.
 2. Verify HS256, optional versioned-secret `kid`, issuer, `exp`, core payload shape, and custom JSON shape.
-3. Load the session by `sid`; reject a missing/expired row, subject mismatch, or token lifetime beyond Better Auth's effective session limit.
-4. Recompute the selected fingerprint. Delete the backing row through `internalAdapter.deleteSession(session.token)` on mismatch.
-5. Load the user. If configured, rerun `getCustomClaims` and require exact JSON equality; do not delete the row on authorization-state mismatch.
-6. Serialize the opaque `session.token` using Better Call's signed-cookie serializer and inject it under `ctx.context.authCookies.sessionToken.name` with Better Auth's `setRequestCookie`.
-7. Populate `ctx.context.session` and continue the native pipeline.
+3. Load the row by `sid` only to recover its opaque native `session.token`, then call `internalAdapter.findSession(token)`. Reject when the row is missing, `findSession` returns null (for example, the secondary store dropped a preserved row's session), or the resolved session id differs from `sid`.
+4. Using the authoritative session and user, reject an expired session, subject mismatch, or token lifetime beyond Better Auth's effective session limit.
+5. Recompute the selected fingerprint. Reject a mismatch with `401` without deleting the shared backing session, so a mismatched bearer cannot terminate a legitimate device's session.
+6. If configured, rerun `getCustomClaims` against the authoritative session/user and require exact JSON equality; do not delete the row on authorization-state mismatch.
+7. Serialize the opaque `session.token` using Better Call's signed-cookie serializer and inject it under `ctx.context.authCookies.sessionToken.name` with Better Auth's `setRequestCookie`.
+8. Populate `ctx.context.session` and continue the native pipeline.
+
+## Strategy seam: plugin hooks and `newSession`
+
+SCJWT is a universal `hooks.before[]`/`hooks.after[]` plugin with `matcher: () => true`, not an endpoint allowlist. Better Auth 1.7.18's public `BetterAuthPlugin` contract still models plugin hooks as these arrays, every session-establishing path (core credentials, social callbacks, passwordless plugins, impersonation, refresh, `update-session`) funnels through `setSessionCookie`, which sets `ctx.context.newSession`, and Better Auth's own bearer plugin uses the same signed request-cookie bridge. Registering `scjwt()` first makes its before-hook populate the session ahead of other plugins' session-dependent hooks.
 
 ## After hook
 
@@ -103,4 +108,4 @@ bun test
 bun run build
 ```
 
-The build must emit declarations for both package entrypoints. The test suite must prove native `getSession`, cookie/header delivery, effective expiry, callback issuance, 2xx-only replacement, dynamic claims, fingerprint revocation, storage invariants, and admin revocation.
+The build must emit declarations for both package entrypoints. The test suite must prove native `getSession`, cookie/header delivery, effective expiry, callback issuance, refresh and `update-session` re-issuance with a stable `sid`, 2xx-only replacement, dynamic claims, fingerprint rejection without session deletion, storage invariants including secondary-store eviction of a preserved row, and admin revocation. The NestJS example's `test:e2e` profiles prove the same contract over HTTP with Admin, Admin RBAC, i18n, captcha, username, email OTP, and their combination.

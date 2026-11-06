@@ -10,7 +10,7 @@ bun add better-auth-scjwt better-auth @better-auth/core jose
 
 Supported peer ranges:
 
-- `better-auth` and `@better-auth/core`: `^1.7.6`
+- `better-auth` and `@better-auth/core`: `~1.7.18` (tested against 1.7.18; 1.8 is not yet supported)
 - `jose`: `^6.2.12`
 
 ## Server setup
@@ -41,6 +41,16 @@ betterAuth({
 ```
 
 Secondary-storage-only sessions fail during initialization.
+
+### Plugin order
+
+Register `scjwt()` before any plugin whose hooks read the current session:
+
+```ts
+plugins: [scjwt(), admin(), username(), emailOTP({ ... }), i18n({ ... })],
+```
+
+Better Auth runs plugin before-hooks in registration order. SCJWT's before-hook is what turns the presented JWT into `ctx.context.session` and the request-only native cookie, so a later hook (for example username's `/update-user` ownership and `immutableUsername` checks) sees the authenticated session. Request interceptors such as captcha (`onRequest`) run before all hooks and are unaffected by order. Keep translation plugins such as i18n last so their after-hook translates the final error.
 
 ## Client setup
 
@@ -80,7 +90,9 @@ interface ScjwtOptions {
 
 Cookie placement uses the resolved Better Auth session-cookie name and attributes, including `advanced.cookiePrefix`, custom cookie names, and the effective `__Secure-` prefix. The plugin replaces only a live native session-token `Set-Cookie` value with the SCJWT. Native session-data, account-data, and clearing cookies remain intact.
 
-Send the cookie unchanged on subsequent Better Auth requests. The before hook verifies the SCJWT, resolves its backing row, signs the row's opaque `session.token` as a request-only Better Auth cookie, and lets the normal Better Auth endpoint or middleware consume it.
+Send the cookie unchanged on subsequent Better Auth requests. The before hook verifies the SCJWT, then resolves it in two stages: the signed `sid` locates the durable database row only to recover its opaque native `session.token`, and Better Auth's lifecycle-aware `internalAdapter.findSession(token)` decides whether that session is still live and returns the authoritative session and user. The hook signs the opaque token as a request-only Better Auth cookie and lets the normal Better Auth endpoint or middleware consume it.
+
+With `secondaryStorage`, `findSession` consults the secondary store first. A session that the secondary store no longer holds is rejected even when `session.preserveSessionInDatabase: true` keeps an unexpired database row for auditing, so evicting or revoking the secondary-store entry revokes the SCJWT.
 
 ### Header placement
 
@@ -170,7 +182,7 @@ Do not trust forwarding headers from origins directly reachable by clients. `ip-
 
 ## Security model
 
-- Signature, issuer, expiry, payload shape, session subject, database expiry, fingerprint, and configured custom claims are checked before native session injection.
+- Signature, issuer, expiry, payload shape, session subject, lifecycle-aware session liveness (`internalAdapter.findSession`), database expiry, fingerprint, and configured custom claims are checked before native session injection.
 - Missing SCJWT falls through to ordinary Better Auth handling. A present invalid SCJWT returns Better Auth's standard `401 UNAUTHORIZED` response.
 - Session deletion is immediate revocation; there is no SCJWT blocklist.
 - Fingerprint mismatch returns `401` without deleting the session, preventing a mismatched bearer from terminating the shared session.
@@ -196,7 +208,7 @@ bun test
 bun run build
 ```
 
-The integration suite exercises real Better Auth endpoints with the memory adapter and test-utils plugin.
+The root integration suite exercises real Better Auth endpoints with the memory adapter and test-utils plugin. The NestJS example adds isolated HTTP profiles for SCJWT alone, Admin, Admin RBAC, i18n, captcha, username, email OTP, and all of them combined; see [`examples/README.md`](./examples/README.md).
 
 ## License
 
