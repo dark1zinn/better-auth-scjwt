@@ -49,6 +49,7 @@ describe('NestJS captcha profile', () => {
     await harness?.close();
   });
 
+  /** POSTs with an `x-captcha-response` header when a captcha value is given. */
   async function post(
     client: AuthClient,
     path: string,
@@ -58,6 +59,10 @@ describe('NestJS captcha profile', () => {
     return client.post(path, body, response ? captchaHeaders(response) : {});
   }
 
+  /**
+   * Asserts a captcha-protected request fails with the given status/code,
+   * emits no SCJWT, and leaves no new user (or no session for an existing one).
+   */
   async function expectCaptchaFailure(
     path: string,
     email: string,

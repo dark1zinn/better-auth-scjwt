@@ -34,6 +34,7 @@ describe('NestJS username profile', () => {
     await harness?.close();
   });
 
+  /** Signs up with a username (default `Nest_User`); returns the raw response. */
   async function signUp(
     client: AuthClient,
     email: string,

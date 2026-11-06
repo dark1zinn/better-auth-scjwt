@@ -12,6 +12,7 @@ import {
 	signUpWithScjwt,
 } from "./helpers/native-auth";
 
+/** In-memory secondary storage plus its backing map, so tests can evict entries. */
 function createSecondaryStorage(): {
 	storage: SecondaryStorage;
 	values: Map<string, string>;

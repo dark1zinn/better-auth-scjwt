@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import type { AuthContext, BetterAuthPlugin } from "better-auth";
 import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
@@ -390,12 +390,17 @@ describe("native Better Auth session transport", () => {
 		const issued = await signUpWithScjwt(auth, "refresh@example.com");
 		const sessionId = decodeJwt(issued.token).sid;
 		const expiresBefore = new Date(db.session[0].expiresAt).getTime();
-		await Bun.sleep(1100);
-
-		const refreshed = await requestSession(
-			auth,
-			createCookieHeaders(issued.cookieName, issued.token),
-		);
+		// Advance the mocked clock so the refresh changes iat/expiresAt without sleeping.
+		setSystemTime(new Date(Date.now() + 2000));
+		let refreshed: Response;
+		try {
+			refreshed = await requestSession(
+				auth,
+				createCookieHeaders(issued.cookieName, issued.token),
+			);
+		} finally {
+			setSystemTime();
+		}
 		expect(refreshed.status).toBe(200);
 		const replacement = readIssuedCookieToken(refreshed, issued.cookieName);
 		expect(replacement.split(".")).toHaveLength(3);
@@ -489,6 +494,7 @@ describe("native Better Auth session transport", () => {
 describe("core Better Auth revocation paths", () => {
 	const PASSWORD = "correct-horse-battery-staple";
 
+	/** Signs in through the core email endpoint and returns the raw response. */
 	async function signIn(
 		auth: { handler(request: Request): Promise<Response> },
 		email: string,
@@ -596,6 +602,7 @@ function withOrigin(headers: Headers): Headers {
 	return result;
 }
 
+/** Returns the SCJWT a response set in `cookieName`, failing when none was delivered. */
 function readIssuedCookieToken(response: Response, cookieName: string): string {
 	const token = parseSetCookieHeader(response.headers.get("set-cookie") ?? "").get(
 		cookieName,

@@ -242,12 +242,10 @@ describe('NestJS Admin profile', () => {
     });
     expect(set.status).toBe(200);
     expectNoScjwt(set, cookieName);
-    const old = await harness
-      .createClient()
-      .post('/api/auth/sign-in/email', {
-        email: targetEmail,
-        password: PASSWORD,
-      });
+    const old = await harness.createClient().post('/api/auth/sign-in/email', {
+      email: targetEmail,
+      password: PASSWORD,
+    });
     expect(old.status).toBe(401);
     const fresh = harness.createClient();
     const next = await fresh.post('/api/auth/sign-in/email', {

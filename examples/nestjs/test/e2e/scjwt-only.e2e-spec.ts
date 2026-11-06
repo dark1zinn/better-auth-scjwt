@@ -30,6 +30,7 @@ describe('NestJS SCJWT-only profile', () => {
     await harness?.close();
   });
 
+  /** Signs up through the client's jar and returns the issued SCJWT. */
   async function signUp(client: AuthClient, email: string) {
     const response = await client.post('/api/auth/sign-up/email', {
       name: 'Nest User',
@@ -40,6 +41,7 @@ describe('NestJS SCJWT-only profile', () => {
     return expectScjwt(response, cookieName);
   }
 
+  /** Signs in through the client's jar and returns the issued SCJWT. */
   async function signIn(
     client: AuthClient,
     email: string,

@@ -27,6 +27,12 @@ import type {
 	ScjwtJwtPayload,
 } from "./types";
 
+/**
+ * Builds SCJWT's universal hooks. The before hook authenticates a presented
+ * SCJWT through Better Auth's session lifecycle and injects the native
+ * session cookie; the after hook issues a replacement SCJWT whenever a
+ * successful response carries `ctx.context.newSession`.
+ */
 export function createScjwtHooks(
 	options: ResolvedScjwtOptions,
 ): NonNullable<BetterAuthPlugin["hooks"]> {

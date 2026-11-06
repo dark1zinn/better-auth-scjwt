@@ -22,6 +22,7 @@ async function signUp(client: AuthClient, email: string) {
   return response;
 }
 
+/** Email/password sign-in; returns the raw response for success or failure checks. */
 async function passwordSignIn(
   client: AuthClient,
   email: string,
@@ -30,6 +31,7 @@ async function passwordSignIn(
   return client.post('/api/auth/sign-in/email', { email, password });
 }
 
+/** Completes OTP sign-in and asserts the issued SCJWT authenticates Better Auth and Nest. */
 async function otpSignIn(
   client: AuthClient,
   email: string,
@@ -181,12 +183,10 @@ describe('NestJS email OTP profile', () => {
     const created = await signUp(client, email);
     expectScjwt(created, cookieName);
     const found = await harness.context.internalAdapter.findUserByEmail(email);
-    expect(found).toBeDefined();
-    if (found) {
-      await harness.context.internalAdapter.updateUser(found.user.id, {
-        emailVerified: false,
-      });
-    }
+    expect(found).not.toBeNull();
+    await harness.context.internalAdapter.updateUser(found!.user.id, {
+      emailVerified: false,
+    });
     await client.post('/api/auth/email-otp/send-verification-otp', {
       email,
       type: 'email-verification',

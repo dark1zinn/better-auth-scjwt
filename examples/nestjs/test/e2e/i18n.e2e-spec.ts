@@ -32,6 +32,7 @@ describe('NestJS i18n profile', () => {
     await harness?.close();
   });
 
+  /** Signs up (optionally storing a preferred locale) and asserts an SCJWT was issued. */
   async function signUp(client: AuthClient, email: string, locale?: string) {
     const response = await client.post('/api/auth/sign-up/email', {
       name: 'Locale User',

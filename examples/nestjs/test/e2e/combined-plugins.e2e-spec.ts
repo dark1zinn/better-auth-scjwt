@@ -122,6 +122,7 @@ describe('NestJS combined-plugins profile', () => {
     await harness?.close();
   });
 
+  /** POSTs with a captcha header; defaults to an accepted captcha response. */
   function post(
     client: AuthClient,
     path: string,

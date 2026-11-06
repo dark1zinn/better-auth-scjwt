@@ -78,6 +78,11 @@ export interface NestAuthHarness<Auth> {
 export type ProfileHarness<AdditionalPlugins extends BetterAuthPlugin[]> =
   NestAuthHarness<ReturnType<typeof createAuth<AdditionalPlugins>>>;
 
+/**
+ * Boots an isolated Nest application for one plugin profile: a fresh SQLite
+ * file, Better Auth migrations, and per-client cookie jars. `close()` is
+ * idempotent and removes the database files.
+ */
 export async function createNestAuthHarness<
   const AdditionalPlugins extends BetterAuthPlugin[],
 >(
@@ -169,11 +174,13 @@ export async function createNestAuthHarness<
   return harness;
 }
 
+/** Cookie header presenting `token` as the session cookie, plus optional extra cookies. */
 function cookieHeader(name: string, token: string, extra?: string): string {
   const pair = `${name}=${encodeURIComponent(token)}`;
   return extra ? `${pair}; ${extra}` : pair;
 }
 
+/** Removes a SQLite database together with its WAL and SHM files. */
 function removeDatabase(databasePath: string): void {
   for (const suffix of ['', '-shm', '-wal']) {
     rmSync(`${databasePath}${suffix}`, { force: true });
@@ -224,6 +231,7 @@ export function expectNoScjwt(
   expect(issued).toEqual([]);
 }
 
+/** Returns the `sid` claim of an SCJWT, failing when it is missing. */
 export function sessionIdOf(token: string): string {
   const sid = decodeJwt(token).sid;
   if (typeof sid !== 'string') {
