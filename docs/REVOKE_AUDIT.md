@@ -1,40 +1,44 @@
-# SCJWT revoke path audit (Better Auth 1.7.6)
+# SCJWT revoke path audit (Better Auth 1.7.18)
 
-SCJWT invalidation is database-backed. Every presented token resolves its `sid` against the canonical Better Auth session table before a signed native session cookie is injected into the endpoint request. A missing or expired row returns `401`; no separate JWT blocklist exists.
+SCJWT invalidation is lifecycle-backed. Every presented token uses its `sid` to load the durable Better Auth session row, recovers that row's opaque native token, and asks Better Auth's `internalAdapter.findSession` whether the session is still live before a signed native session cookie is injected into the endpoint request. A missing row, a session that `findSession` no longer returns (including a secondary-store eviction of a preserved row), or an expired session returns `401`; no separate JWT blocklist exists.
 
-Audit target: Better Auth 1.7.6 session-deletion paths and the next SCJWT-backed request.
+Audit target: Better Auth 1.7.18 session-deletion paths and the next SCJWT-backed request. "Root" tests use the memory adapter (`bun test`); "Nest" tests are HTTP profiles in `examples/nestjs/test/e2e` (`bun run --cwd examples/nestjs test:e2e`).
 
 ## Checklist
 
-| Path | Better Auth API | Session-row effect | Next SCJWT request | Coverage |
+| Path | Better Auth route | Session effect | Next SCJWT request | Coverage |
 |---|---|---|---|---|
-| Sign out | `auth.api.signOut` | Deletes current row | `401` | Automated in `test/native-session.test.ts` |
-| Revoke one session | `auth.api.revokeSession` | Deletes target row | `401` | Better Auth 1.7.6 source audit |
-| Revoke other sessions | `auth.api.revokeOtherSessions` | Deletes other rows; keeps current | Revoked tokens `401` | Better Auth 1.7.6 source audit |
-| Revoke all sessions | `auth.api.revokeSessions` | Deletes all user rows | `401` | Better Auth 1.7.6 source audit |
-| Change password, default | `auth.api.changePassword` | Keeps existing sessions | Token remains valid to effective expiry | Better Auth 1.7.6 source audit |
-| Change password with revoke | `revokeOtherSessions: true` | Deletes other rows | Revoked tokens `401` | Better Auth 1.7.6 source audit |
-| Password reset | `auth.api.resetPassword` | Deletes rows only with `emailAndPassword.revokeSessionsOnPasswordReset: true` | `401` when configured | Better Auth 1.7.6 source audit |
-| Delete user | `auth.api.deleteUser` | Deletes user sessions | `401` | Better Auth 1.7.6 source audit |
-| Admin ban | `auth.api.banUser` | Deletes all target rows | `401` | Automated in `test/admin-revoke-paths.test.ts` |
-| Admin revoke one | `auth.api.revokeUserSession` | Deletes target row | `401` | Automated in `test/admin-revoke-paths.test.ts` |
-| Admin revoke all | `auth.api.revokeUserSessions` | Deletes all target rows | `401` | Automated in `test/admin-revoke-paths.test.ts` |
-| Unban user | `auth.api.unbanUser` | Does not recreate sessions | Old tokens remain invalid | Source-audited; intentionally not treated as revival |
-| Stop impersonating | `auth.api.stopImpersonating` | Deletes impersonation row and restores the admin cookie | Impersonation token `401` | Better Auth 1.7.6 source audit |
-| Fingerprint mismatch | SCJWT before hook | Keeps row | Mismatched token `401`; correctly bound token remains valid | Automated in `test/fingerprint-mode.test.ts` |
-| Custom-claim mismatch | SCJWT before hook | Keeps row | `401` | Automated in `test/custom-claims.test.ts` |
+| Sign out | `/sign-out` | Deletes current session | `401` | Root `test/native-session.test.ts`; Nest `scjwt-only` |
+| Revoke one session | `/revoke-session` | Deletes target session | `401` | Nest `scjwt-only` |
+| Revoke other sessions | `/revoke-other-sessions` | Deletes others; keeps current | Revoked tokens `401` | Nest `scjwt-only` |
+| Revoke all sessions | `/revoke-sessions` | Deletes all user sessions | `401` | Root `test/native-session.test.ts`; Nest `scjwt-only` |
+| Change password, default | `/change-password` | Keeps existing sessions | Token remains valid to effective expiry | Better Auth 1.7.18 source audit |
+| Change password with revoke | `revokeOtherSessions: true` | Deletes others; re-issues current | Revoked tokens `401`; replacement valid | Nest `scjwt-only` |
+| Password reset (core) | `/request-password-reset` + `/reset-password` | Deletes sessions only with `emailAndPassword.revokeSessionsOnPasswordReset: true` | `401` when configured | Root `test/native-session.test.ts` |
+| Password reset (email OTP) | `/email-otp/reset-password` | Same setting as core reset | `401` when configured | Nest `email-otp`, `combined-plugins` |
+| Delete user (self) | `/delete-user` | Deletes user and sessions | `401` | Root `test/native-session.test.ts` |
+| Admin ban | `/admin/ban-user` | Deletes all target sessions | `401` | Root `test/admin-revoke-paths.test.ts`; Nest `admin`, `combined-plugins` |
+| Admin revoke one | `/admin/revoke-user-session` | Deletes target session | `401` | Root `test/admin-revoke-paths.test.ts`; Nest `admin`, `combined-plugins` |
+| Admin revoke all | `/admin/revoke-user-sessions` | Deletes all target sessions | `401` | Root `test/admin-revoke-paths.test.ts`; Nest `admin` |
+| Admin remove user | `/admin/remove-user` | Deletes user and sessions | `401` | Nest `admin` |
+| Unban user | `/admin/unban-user` | Does not recreate sessions | Old tokens remain `401` | Nest `admin`, `combined-plugins` |
+| Stop impersonating | `/admin/stop-impersonating` | Deletes impersonation session; restores admin session from `admin_session` | Impersonation token `401`; admin `sid` restored | Nest `admin`, `combined-plugins` |
+| Secondary-store eviction | `secondaryStorage` entry removed, row preserved | `findSession` returns null | `401` | Root `test/secondary-storage.test.ts` |
+| Fingerprint mismatch | SCJWT before hook | Keeps session | Mismatched token `401`; bound token remains valid | Root `test/fingerprint-mode.test.ts` |
+| Custom-claim mismatch | SCJWT before hook | Keeps session | `401` | Root `test/custom-claims.test.ts` |
+| Email-OTP sign-in on unverified account | `/sign-in/email-otp` (`revokeUnprovenAccountAccess`) | Deletes pre-proof sessions and linked accounts, then marks email verified | Pre-proof tokens `401` | Nest `combined-plugins` |
+
+Session refresh (`/get-session` past `updateAge`) and `/update-session` re-issue an SCJWT with the same `sid`; sign-out afterwards invalidates both the old and replacement tokens (root `test/native-session.test.ts`).
 
 ## Host configuration
 
 - Set `emailAndPassword.revokeSessionsOnPasswordReset: true` when password reset must invalidate every device.
 - Use `revokeOtherSessions: true` on password change when other devices must lose access immediately.
-- A configured `secondaryStorage` must also set `session.storeSessionInDatabase: true`; SCJWT deliberately validates the immediately revocable database row.
+- A configured `secondaryStorage` must also set `session.storeSessionInDatabase: true`; the row maps `sid` to the native token while `findSession` decides liveness.
 - Header-placement clients must remove their locally stored Bearer token after logout or revocation. The server cannot clear client-managed authorization state.
 
 ## References
 
-- `src/plugin/hooks.ts` — authoritative session lookup, native request-cookie injection, and fingerprint revocation.
-- `test/native-session.test.ts` — native session transport and core sign-out invalidation.
-- `test/admin-revoke-paths.test.ts` — Better Auth 1.7.6 admin ban and revoke paths.
-- `test/fingerprint-mode.test.ts` — device/IP mismatch revocation.
-- Better Auth test utilities: <https://better-auth.com/docs/plugins/test-utils>
+- `src/plugin/hooks.ts` — `resolveAuthoritativeSession`, native request-cookie injection, fingerprint and custom-claim rejection.
+- `test/native-session.test.ts`, `test/secondary-storage.test.ts`, `test/admin-revoke-paths.test.ts`, `test/fingerprint-mode.test.ts`, `test/custom-claims.test.ts` — root lifecycle coverage.
+- `examples/nestjs/test/e2e/*.e2e-spec.ts` — HTTP profiles per plugin and combined.
