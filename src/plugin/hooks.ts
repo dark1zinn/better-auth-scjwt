@@ -60,13 +60,8 @@ export function createScjwtHooks(
 						token,
 						options.getCustomClaims !== undefined,
 					);
-					const session = await ctx.context.adapter.findOne<Session>({
-						model: "session",
-						where: [{ field: "id", value: payload.sid }],
-					});
-					if (!session) {
-						unauthorized();
-					}
+					const { session, user, nativeToken } =
+						await resolveAuthoritativeSession(ctx.context, payload.sid);
 
 					const sessionExpiresAt = Math.floor(
 						new Date(session.expiresAt).getTime() / 1000,
@@ -97,12 +92,6 @@ export function createScjwtHooks(
 						unauthorized();
 					}
 
-					const user = await ctx.context.internalAdapter.findUserById(
-						session.userId,
-					);
-					if (!user) {
-						unauthorized();
-					}
 					if (options.getCustomClaims) {
 						const expectedClaims = await resolveCustomClaims(options, {
 							session,
@@ -114,11 +103,10 @@ export function createScjwtHooks(
 						}
 					}
 
-					const resolvedSession = { session, user };
-					ctx.context.session = resolvedSession;
+					ctx.context.session = { session, user };
 					const headers = new Headers(sourceHeaders);
 					const serializedSessionToken = (
-						await serializeSignedCookie("", session.token, ctx.context.secret)
+						await serializeSignedCookie("", nativeToken, ctx.context.secret)
 					).replace("=", "");
 					let signedSessionToken = serializedSessionToken;
 					try {
@@ -259,6 +247,31 @@ async function resolveCustomClaims(
 	const claims = await options.getCustomClaims?.(context);
 	validateCustomClaims(claims);
 	return claims;
+}
+
+/**
+ * Resolves a signed `sid` through Better Auth's lifecycle-aware session lookup.
+ *
+ * The durable row only maps the public session ID to its opaque native token;
+ * `internalAdapter.findSession` then decides liveness, so secondary-storage
+ * eviction and revocation are honored even when the database row is preserved.
+ */
+async function resolveAuthoritativeSession(
+	context: AuthContext,
+	sessionId: string,
+) {
+	const candidate = await context.adapter.findOne<Session>({
+		model: "session",
+		where: [{ field: "id", value: sessionId }],
+	});
+	if (!candidate) {
+		unauthorized();
+	}
+	const resolved = await context.internalAdapter.findSession(candidate.token);
+	if (!resolved || resolved.session.id !== sessionId) {
+		unauthorized();
+	}
+	return { ...resolved, nativeToken: candidate.token };
 }
 
 function unauthorized(): never {
