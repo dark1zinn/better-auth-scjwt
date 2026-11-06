@@ -376,4 +376,232 @@ describe("native Better Auth session transport", () => {
 			}
 		}
 	});
+
+	test("re-issues the same session ID when get-session refreshes the native session", async () => {
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			session: { expiresIn: 3600, updateAge: 0 },
+			plugins: [scjwt()],
+		});
+		const issued = await signUpWithScjwt(auth, "refresh@example.com");
+		const sessionId = decodeJwt(issued.token).sid;
+		const expiresBefore = new Date(db.session[0].expiresAt).getTime();
+		await Bun.sleep(1100);
+
+		const refreshed = await requestSession(
+			auth,
+			createCookieHeaders(issued.cookieName, issued.token),
+		);
+		expect(refreshed.status).toBe(200);
+		const replacement = readIssuedCookieToken(refreshed, issued.cookieName);
+		expect(replacement.split(".")).toHaveLength(3);
+		expect(replacement).not.toBe(issued.token);
+		expect(decodeJwt(replacement).sid).toBe(sessionId);
+		expect(new Date(db.session[0].expiresAt).getTime()).toBeGreaterThan(
+			expiresBefore,
+		);
+
+		const replacementHeaders = createCookieHeaders(issued.cookieName, replacement);
+		const signOut = await auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/sign-out`, {
+				method: "POST",
+				headers: withOrigin(replacementHeaders),
+			}),
+		);
+		expect(signOut.status).toBe(200);
+		for (const token of [issued.token, replacement]) {
+			const response = await requestSession(
+				auth,
+				createCookieHeaders(issued.cookieName, token),
+			);
+			expect(response.status).toBe(401);
+		}
+	});
+
+	test("re-issues the same session ID from update-session with native additional fields", async () => {
+		const auth = betterAuth({
+			database: memoryAdapter(createMemoryDB()),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			session: {
+				additionalFields: {
+					deviceLabel: { type: "string", required: false },
+				},
+			},
+			plugins: [scjwt()],
+		});
+		const issued = await signUpWithScjwt(auth, "update-session@example.com");
+		const sessionId = decodeJwt(issued.token).sid;
+
+		const updated = await auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/update-session`, {
+				method: "POST",
+				headers: withOrigin(
+					createCookieHeaders(issued.cookieName, issued.token, {
+						...STABLE_HEADERS,
+						"content-type": "application/json",
+					}),
+				),
+				body: JSON.stringify({ deviceLabel: "work laptop" }),
+			}),
+		);
+		expect(updated.status).toBe(200);
+		const updatedBody = (await updated.json()) as {
+			session: { id: string; deviceLabel?: string };
+		};
+		expect(updatedBody.session).toMatchObject({
+			id: sessionId,
+			deviceLabel: "work laptop",
+		});
+		const replacement = readIssuedCookieToken(updated, issued.cookieName);
+		expect(decodeJwt(replacement).sid).toBe(sessionId);
+
+		const replacementHeaders = createCookieHeaders(issued.cookieName, replacement);
+		const current = await requestSession(auth, replacementHeaders);
+		expect(current.status).toBe(200);
+		expect(await current.json()).toMatchObject({
+			session: { id: sessionId, deviceLabel: "work laptop" },
+			user: { email: "update-session@example.com" },
+		});
+
+		const revoke = await auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/revoke-sessions`, {
+				method: "POST",
+				headers: withOrigin(replacementHeaders),
+			}),
+		);
+		expect(revoke.status).toBe(200);
+		for (const token of [issued.token, replacement]) {
+			const response = await requestSession(
+				auth,
+				createCookieHeaders(issued.cookieName, token),
+			);
+			expect(response.status).toBe(401);
+		}
+	});
 });
+
+describe("core Better Auth revocation paths", () => {
+	const PASSWORD = "correct-horse-battery-staple";
+
+	async function signIn(
+		auth: { handler(request: Request): Promise<Response> },
+		email: string,
+		password = PASSWORD,
+	) {
+		return auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/sign-in/email`, {
+				method: "POST",
+				headers: { ...STABLE_HEADERS, "content-type": "application/json" },
+				body: JSON.stringify({ email, password }),
+			}),
+		);
+	}
+
+	test("rejects every SCJWT after the user deletes their account", async () => {
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			user: { deleteUser: { enabled: true } },
+			plugins: [scjwt()],
+		});
+		const email = "delete-user@example.com";
+		const first = await signUpWithScjwt(auth, email);
+		const second = readIssuedCookieToken(await signIn(auth, email), first.cookieName);
+
+		const deleted = await auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/delete-user`, {
+				method: "POST",
+				headers: withOrigin(
+					createCookieHeaders(first.cookieName, second, {
+						...STABLE_HEADERS,
+						"content-type": "application/json",
+					}),
+				),
+				body: JSON.stringify({ password: PASSWORD }),
+			}),
+		);
+		expect(deleted.status).toBe(200);
+		expect(db.user).toHaveLength(0);
+		for (const token of [first.token, second]) {
+			const response = await requestSession(
+				auth,
+				createCookieHeaders(first.cookieName, token),
+			);
+			expect(response.status).toBe(401);
+		}
+	});
+
+	test("rejects pre-reset SCJWTs when password reset revokes sessions", async () => {
+		let resetToken = "";
+		const auth = betterAuth({
+			database: memoryAdapter(createMemoryDB()),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: {
+				enabled: true,
+				revokeSessionsOnPasswordReset: true,
+				async sendResetPassword({ token }) {
+					resetToken = token;
+				},
+			},
+			plugins: [scjwt()],
+		});
+		const email = "core-reset@example.com";
+		const issued = await signUpWithScjwt(auth, email);
+		const jsonHeaders = { ...STABLE_HEADERS, "content-type": "application/json" };
+
+		const requested = await auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/request-password-reset`, {
+				method: "POST",
+				headers: jsonHeaders,
+				body: JSON.stringify({ email }),
+			}),
+		);
+		expect(requested.status).toBe(200);
+		expect(resetToken).not.toBe("");
+
+		const reset = await auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/reset-password`, {
+				method: "POST",
+				headers: jsonHeaders,
+				body: JSON.stringify({
+					token: resetToken,
+					newPassword: `${PASSWORD}-reset`,
+				}),
+			}),
+		);
+		expect(reset.status).toBe(200);
+		const response = await requestSession(
+			auth,
+			createCookieHeaders(issued.cookieName, issued.token),
+		);
+		expect(response.status).toBe(401);
+		expect((await signIn(auth, email)).status).toBe(401);
+		expect((await signIn(auth, email, `${PASSWORD}-reset`)).status).toBe(200);
+	});
+});
+
+function withOrigin(headers: Headers): Headers {
+	const result = new Headers(headers);
+	result.set("origin", TEST_BASE_URL);
+	return result;
+}
+
+function readIssuedCookieToken(response: Response, cookieName: string): string {
+	const token = parseSetCookieHeader(response.headers.get("set-cookie") ?? "").get(
+		cookieName,
+	)?.value;
+	if (!token) {
+		throw new Error(`response did not deliver ${cookieName}`);
+	}
+	return token;
+}
