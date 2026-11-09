@@ -236,6 +236,10 @@ bun run test:package
 
 The root integration suite exercises real Better Auth endpoints with the memory adapter and test-utils plugin. The NestJS example adds isolated HTTP profiles for SCJWT alone, Admin, Admin RBAC, i18n, captcha, username, email OTP, two-factor, and the combined plugins; see [`examples/README.md`](./examples/README.md).
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on pull requests, pushes to `main`, and manual dispatch, with read-only repository permissions and no secrets. It pins `actions/checkout`, `oven-sh/setup-bun`, and `actions/setup-node` to release commit SHAs, uses Bun 1.4.2 and Node.js 24.22.2, installs with `--frozen-lockfile`, and runs the same commands as above: root `typecheck`/`test`/`build`, `test:package`, the NestJS example's `typecheck`/`test`/`build`, and each E2E profile as its own matrix job. The final `CI` job succeeds only when every other job succeeded; mark that check as required in branch protection to gate merges.
+
 `bun run build` is the only artifact pipeline: tsdown bundles `dist/index.mjs` and `dist/client.mjs`, and its declaration step (TypeScript 7 via `tsgo`) emits the bundled `index.d.mts` and `client.d.mts` that the `exports` map points at. `bun run test:package` packs the package exactly as published, installs the tarball into a throwaway project outside the repository, runs both entrypoints under Node.js and Bun, and type-checks a consumer under `bundler` and `NodeNext` resolution with `skipLibCheck` off, including Better Auth's `getSession` inference and `@thallesp/nestjs-better-auth`'s `UserSession`. It needs network access (or a warm Bun cache) for the consumer install.
 
 ## License
