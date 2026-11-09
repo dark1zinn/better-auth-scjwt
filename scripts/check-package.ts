@@ -37,8 +37,8 @@ const examplePackage = await readPackage(join(root, "examples/nestjs/package.jso
 const temp = await mkdtemp(join(tmpdir(), "scjwt-package-"));
 
 try {
-	await $`bun run build`.cwd(root);
-	await $`bun pm pack --ignore-scripts --quiet --destination ${temp}`.cwd(root);
+	// `prepack` runs the build, so the tarball is produced by the same lifecycle as a publish.
+	await $`bun pm pack --quiet --destination ${temp}`.cwd(root);
 	const tarball = (await readdir(temp)).find((name) => name.endsWith(".tgz"));
 	if (!tarball) {
 		throw new Error("[check-package] bun pm pack produced no tarball");

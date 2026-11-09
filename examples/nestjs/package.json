@@ -16,7 +16,7 @@
     "start:debug": "nest start --debug --watch --exec bun",
     "start:prod": "bun dist/main.js",
     "lint": "oxlint --type-aware src/ test/",
-    "sync:scjwt": "bun run --cwd ../.. build && bun install --cwd ../.. --force",
+    "sync:scjwt": "bun run --cwd ../.. build && bun install --cwd ../.. --frozen-lockfile --ignore-scripts --force",
     "pretest": "bun run sync:scjwt",
     "test": "vitest run",
     "test:watch": "vitest",
