@@ -56,6 +56,24 @@ export function deliverSessionToken(
 	}
 }
 
+/**
+ * Whether the effective (last) `Set-Cookie` for `name` in `headers` keeps the
+ * cookie alive, as opposed to clearing it. Absent cookies are not live.
+ */
+export function hasLiveSetCookie(headers: Headers | undefined, name: string): boolean {
+	if (!headers) {
+		return false;
+	}
+	let live = false;
+	for (const setCookie of getSetCookieValues(headers)) {
+		const parsed = parseSingleSetCookie(setCookie);
+		if (parsed?.[0] === name) {
+			live = isLiveCookie(parsed[1]);
+		}
+	}
+	return live;
+}
+
 function getSetCookieValues(headers: Headers): string[] {
 	const withGetSetCookie = headers as Headers & {
 		getSetCookie?: () => string[];

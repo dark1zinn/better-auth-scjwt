@@ -27,11 +27,11 @@ flowchart TD
   E -->|Mismatch| F[Keep session and return 401]
   E -->|Match| G[Load user and recompute custom claims]
   G -->|Mismatch| H[Keep session and return 401]
-  G -->|Match| I[Sign opaque session.token as request-only Better Auth cookie]
+  G -->|Match| I[Sign opaque session.token and, when remember is false, the dontRemember marker as request-only Better Auth cookies]
   I --> J[Run normal Better Auth endpoint and middleware]
 ```
 
-The injected cookie never replaces the response transport. It exists only in the current request headers so Better Auth's native `getSession`, sensitive-session middleware, account endpoints, and third-party plugins follow their standard path.
+The injected cookies never replace the response transport. They exist only in the current request headers so Better Auth's native `getSession`, sensitive-session middleware, account endpoints, and third-party plugins follow their standard path. A caller-supplied `dontRemember` cookie is always discarded; the marker comes only from the signed `remember` claim.
 
 ## Issuance and refresh flow
 
@@ -62,7 +62,7 @@ Transport selection also defines precedence. The unselected source is ignored ra
 
 ## Claims
 
-Core claims are `iss`, `sub`, `fp`, `iat`, `exp`, and `sid`. `getCustomClaims` may add bounded JSON values. The resolver receives the authoritative session and user plus the current `Request` when one exists.
+Core claims are `iss`, `sub`, `fp`, `iat`, `exp`, `sid`, and `remember`. `remember` is `false` exactly when the issuing response carried a live Better Auth `dontRemember` marker (a `rememberMe: false` sign-in or a re-issuance that inherited it), and it is required: tokens without it are rejected. `getCustomClaims` may add bounded JSON values. The resolver receives the authoritative session and user plus the current `Request` when one exists.
 
 Custom claims are visible signed data, not encrypted profile storage. The implementation limits count, encoded size, nesting, types, and reserved names. Verification reruns the resolver and requires exact JSON equality. This turns current roles or entitlements into short-lived assertions without creating a second revocation database.
 
@@ -90,6 +90,7 @@ Plain Better Auth `secret` produces an HS256 token without `kid`. Better Auth ve
 - `test/native-session.test.ts`: cookie/header transport, native `getSession`, custom secure prefixes, precedence, callback issuance, failure suppression, core sign-out.
 - `test/custom-claims.test.ts`: issuance/refresh resolver calls, JSON limits, strict default payload, dynamic mismatch, secret rotation.
 - `test/lifecycle-finalization.test.ts`: terminal finalizer ordering, late denial and session withdrawal or substitution, HTTP and direct `auth.api` parity, shared plugin instances, finalizer-position and duplicate-registration guards.
+- `test/session-lifetime.test.ts`: `rememberMe: false` sessions in both placements keep their native expiry without sliding, remembered sessions refresh, supplied `dontRemember` cookies are ignored, re-issuance inherits the policy, and a remembered sign-in replaces a non-persistent session.
 - `test/fingerprint-mode.test.ts`: missing headers, strict mismatch revocation, IP-only behavior, trusted proxies.
 - `test/secondary-storage.test.ts`: database and secondary-storage initialization invariants.
 - `test/admin-revoke-paths.test.ts`: Better Auth admin ban and session-revoke paths.

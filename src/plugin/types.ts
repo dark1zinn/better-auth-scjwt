@@ -38,5 +38,7 @@ export interface ScjwtJwtPayload {
 	iat: number;
 	exp: number;
 	sid: string;
+	/** `false` when Better Auth issued the session with `rememberMe: false`. */
+	remember: boolean;
 	[key: string]: JsonValue;
 }

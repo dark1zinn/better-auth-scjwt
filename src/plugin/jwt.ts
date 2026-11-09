@@ -18,6 +18,7 @@ const CORE_CLAIMS: Record<string, true> = {
 	iat: true,
 	exp: true,
 	sid: true,
+	remember: true,
 };
 const RESERVED_CLAIMS: Record<string, true> = {
 	...CORE_CLAIMS,
@@ -42,6 +43,8 @@ export interface BuildJwtPayloadParams {
 	fingerprint: string;
 	sessionId: string;
 	expiresAt: number;
+	/** `false` for Better Auth `rememberMe: false` sessions, which must not slide. */
+	remember: boolean;
 	issuedAt?: number;
 	customClaims?: CustomClaims;
 }
@@ -57,6 +60,7 @@ export function buildJwtPayload(params: BuildJwtPayloadParams): ScjwtJwtPayload 
 		iat,
 		exp: params.expiresAt,
 		sid: params.sessionId,
+		remember: params.remember,
 		...customClaims,
 	};
 	assertValidCorePayload(payload);
@@ -134,6 +138,7 @@ export function parseJwtPayload(
 		iat: readIntegerClaim(payload, "iat"),
 		exp: readIntegerClaim(payload, "exp"),
 		sid: readStringClaim(payload, "sid"),
+		remember: readBooleanClaim(payload, "remember"),
 		...(customClaims as CustomClaims),
 	};
 	assertValidCorePayload(parsed);
@@ -296,6 +301,14 @@ function readStringClaim(payload: JWTPayload, claim: string): string {
 	return value;
 }
 
+function readBooleanClaim(payload: JWTPayload, claim: string): boolean {
+	const value = payload[claim];
+	if (typeof value !== "boolean") {
+		throw new Error(`[scjwt] JWT claim "${claim}" must be a boolean.`);
+	}
+	return value;
+}
+
 function readIntegerClaim(payload: JWTPayload, claim: string): number {
 	const value = payload[claim];
 	if (typeof value !== "number" || !Number.isInteger(value)) {
@@ -327,5 +340,8 @@ function assertValidCorePayload(payload: ScjwtJwtPayload): void {
 	}
 	if (!payload.sid.trim()) {
 		throw new Error("[scjwt] JWT payload sid must be a non-empty string.");
+	}
+	if (typeof payload.remember !== "boolean") {
+		throw new Error("[scjwt] JWT payload remember must be a boolean.");
 	}
 }

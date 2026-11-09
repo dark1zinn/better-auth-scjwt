@@ -110,6 +110,7 @@ export async function mintScjwt(
 			Math.floor(new Date(session.expiresAt).getTime() / 1000),
 			issuedAt + context.sessionConfig.expiresIn,
 		),
+		remember: true,
 		issuedAt,
 	});
 }

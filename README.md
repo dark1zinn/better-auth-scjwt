@@ -150,6 +150,9 @@ The core payload is:
 | `fp` | Lowercase SHA-256 fingerprint. |
 | `iat`, `exp` | Unix issuance and effective-expiry seconds. |
 | `sid` | Canonical Better Auth session-row ID. |
+| `remember` | `false` when Better Auth created the session with `rememberMe: false`; otherwise `true`. |
+
+`remember` carries Better Auth's non-persistent session policy without a client cookie. At issuance it mirrors the native `dontRemember` marker that `setSessionCookie` writes; on each request SCJWT discards any caller-supplied `dontRemember` cookie and reconstructs the signed marker only when `remember` is `false`. Better Auth then skips refresh exactly as it would for a native `rememberMe: false` session, so such sessions keep their one-day lifetime in both placements, and replacement tokens (for example from `/update-session`) inherit the policy. In cookie placement the SCJWT cookie of a non-persistent session is a browser-session cookie; header clients decide how long they keep their own Bearer token.
 
 With a single Better Auth `secret`, SCJWT signs directly with that secret. With Better Auth `secrets`, new tokens carry the current secret version as `kid`; verification accepts current and retained versions.
 
@@ -159,7 +162,7 @@ Without `getCustomClaims`, every extra payload key is rejected. With a resolver,
 - serialize to at most 1024 UTF-8 bytes;
 - contain no values deeper than eight containers;
 - contain only finite numbers, strings, booleans, null, arrays, and plain objects;
-- not use `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `fp`, or `sid`.
+- not use `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `fp`, `sid`, or `remember`.
 
 The resolver runs again after the session and user are loaded. Presented custom claims must deep-equal the current result. Custom-claim and device-fingerprint mismatches reject the token without deleting its shared backing session.
 
@@ -191,7 +194,13 @@ Do not trust forwarding headers from origins directly reachable by clients. `ip-
 - Custom-claim mismatch returns `401` without deleting the session.
 - Revocation audit: [`docs/REVOKE_AUDIT.md`](./docs/REVOKE_AUDIT.md).
 
-## Migration from 0.0.x
+## Migration
+
+### Tokens issued before the `remember` claim
+
+`remember` is a required claim. Tokens issued by earlier 0.1.x builds lack it and are rejected with `401`; users sign in again to receive a replacement. No database migration is involved, and there is no fallback that accepts the old shape.
+
+### From 0.0.x
 
 1. Remove `jwtSecret`, `issuer`, `expiresInSeconds`, `cookieName`, and `slidingSession` from `scjwt()`.
 2. Configure signing, issuer, lifetime, and refresh through Better Auth's `secret`/`secrets`, `baseURL`, and `session` options.

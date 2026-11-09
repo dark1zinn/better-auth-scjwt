@@ -1,11 +1,7 @@
 import type { GenericEndpointContext } from "@better-auth/core";
 import type { AuthContext, BetterAuthPlugin, Session } from "better-auth";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
-import {
-	expireCookie,
-	parseCookies,
-	setRequestCookie,
-} from "better-auth/cookies";
+import { expireCookie, parseCookies } from "better-auth/cookies";
 import { serializeSignedCookie } from "better-call";
 import { computeFingerprint } from "./fingerprint";
 import {
@@ -19,6 +15,7 @@ import {
 import { getRequestFingerprintInput } from "./request-context";
 import {
 	deliverSessionToken,
+	hasLiveSetCookie,
 	isHeaderOnlyNativeCookie,
 	SET_AUTH_TOKEN_HEADER,
 } from "./token-deliver";
@@ -114,20 +111,12 @@ export function createScjwtHooks(
 					}
 
 					ctx.context.session = { session, user };
-					const headers = new Headers(sourceHeaders);
-					const serializedSessionToken = (
-						await serializeSignedCookie("", nativeToken, ctx.context.secret)
-					).replace("=", "");
-					let signedSessionToken = serializedSessionToken;
-					try {
-						signedSessionToken = decodeURIComponent(serializedSessionToken);
-					} catch {
-						// The serializer currently percent-encodes. Keep the raw value if that changes.
-					}
-					setRequestCookie(
-						headers,
-						ctx.context.authCookies.sessionToken.name,
-						signedSessionToken,
+					const headers = await buildAuthenticatedRequestHeaders(
+						sourceHeaders,
+						ctx.context.authCookies,
+						ctx.context.secret,
+						nativeToken,
+						payload.remember,
 					);
 					return { context: { headers } };
 				}),
@@ -186,6 +175,10 @@ export function createScjwtHooks(
 							sessionId: newSession.session.id,
 							expiresAt,
 							issuedAt,
+							remember: !hasLiveSetCookie(
+								ctx.context.responseHeaders,
+								ctx.context.authCookies.dontRememberToken.name,
+							),
 							customClaims,
 						});
 					} catch (error) {
@@ -205,6 +198,54 @@ export function createScjwtHooks(
 			},
 		],
 	};
+}
+
+/**
+ * Builds the request-only headers Better Auth's endpoint sees for a verified
+ * SCJWT: the signed native session cookie replaces the presented credential,
+ * and the `dontRemember` marker is reconstructed solely from the signed
+ * `remember` claim so a caller-supplied marker can neither add nor remove
+ * Better Auth's no-refresh policy.
+ */
+async function buildAuthenticatedRequestHeaders(
+	sourceHeaders: Headers,
+	authCookies: AuthContext["authCookies"],
+	secret: string,
+	nativeToken: string,
+	remember: boolean,
+): Promise<Headers> {
+	const cookies = parseCookies(sourceHeaders.get("cookie") ?? "");
+	cookies.delete(authCookies.dontRememberToken.name);
+	cookies.set(
+		authCookies.sessionToken.name,
+		await signRequestCookieValue(nativeToken, secret),
+	);
+	if (!remember) {
+		cookies.set(
+			authCookies.dontRememberToken.name,
+			await signRequestCookieValue("true", secret),
+		);
+	}
+	const headers = new Headers(sourceHeaders);
+	headers.set("cookie", serializeRequestCookies(cookies));
+	return headers;
+}
+
+/** Signs `value` the way Better Auth's `setSignedCookie` stores it. */
+async function signRequestCookieValue(value: string, secret: string): Promise<string> {
+	const serialized = (await serializeSignedCookie("", value, secret)).replace("=", "");
+	try {
+		return decodeURIComponent(serialized);
+	} catch {
+		// The serializer currently percent-encodes. Keep the raw value if that changes.
+		return serialized;
+	}
+}
+
+function serializeRequestCookies(cookies: Map<string, string>): string {
+	return [...cookies]
+		.map(([name, value]) => `${name}=${encodeURIComponent(value)}`)
+		.join("; ");
 }
 
 /**
@@ -242,16 +283,7 @@ function stripNativeSessionCookies(
 		return null;
 	}
 	const headers = new Headers(sourceHeaders);
-	if (cookies.size === 0) {
-		headers.set("cookie", "");
-	} else {
-		headers.set(
-			"cookie",
-			[...cookies]
-				.map(([name, value]) => `${name}=${encodeURIComponent(value)}`)
-				.join("; "),
-		);
-	}
+	headers.set("cookie", serializeRequestCookies(cookies));
 	return headers;
 }
 

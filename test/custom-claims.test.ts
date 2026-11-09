@@ -32,6 +32,7 @@ function tokenParts(customClaims?: Record<string, never | string | number | bool
 		fingerprint: FINGERPRINT,
 		sessionId: "claims-session",
 		expiresAt: issuedAt + 3600,
+		remember: true,
 		issuedAt,
 		customClaims,
 	};
