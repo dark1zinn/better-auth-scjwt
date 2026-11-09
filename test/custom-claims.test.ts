@@ -108,6 +108,82 @@ describe("custom SCJWT claims", () => {
 		expect(db.session).toHaveLength(1);
 	});
 
+	test("authenticates claims whose numbers change representation through JSON", async () => {
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [
+				scjwt({
+					getCustomClaims: () => ({
+						offset: -0,
+						nested: { values: [-0, 1.5, { zero: -0 }] },
+					}),
+				}),
+			],
+		});
+		const issued = await signUpWithScjwt(auth, "negative-zero@example.com");
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const response = await requestSession(
+				auth,
+				createCookieHeaders(issued.cookieName, issued.token),
+			);
+			expect(response.status).toBe(200);
+		}
+		expect(db.session).toHaveLength(1);
+	});
+
+	test("rejects a changed numeric claim without deleting the session", async () => {
+		let level = 1;
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [scjwt({ getCustomClaims: () => ({ limits: [level] }) })],
+		});
+		const issued = await signUpWithScjwt(auth, "changed-number@example.com");
+		level = 2;
+		const response = await requestSession(
+			auth,
+			createCookieHeaders(issued.cookieName, issued.token),
+		);
+		expect(response.status).toBe(401);
+		expect(db.session).toHaveLength(1);
+	});
+
+	test("refuses to issue non-finite claims and delivers no credential", async () => {
+		for (const value of [Number.NaN, Number.POSITIVE_INFINITY]) {
+			const auth = betterAuth({
+				database: memoryAdapter(createMemoryDB()),
+				baseURL: TEST_BASE_URL,
+				secret: TEST_SECRET,
+				emailAndPassword: { enabled: true },
+				plugins: [scjwt({ getCustomClaims: () => ({ score: value }) })],
+			});
+			const response = await auth.handler(
+				new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
+					method: "POST",
+					headers: { ...STABLE_HEADERS, "content-type": "application/json" },
+					body: JSON.stringify({
+						name: "Non-finite",
+						email: `non-finite-${String(value)}@example.com`,
+						password: "correct-horse-battery-staple",
+					}),
+				}),
+			);
+			expect(response.status).toBe(500);
+			expect(response.headers.get("set-auth-token")).toBeNull();
+			const sessionCookie = parseSetCookieHeader(
+				response.headers.get("set-cookie") ?? "",
+			).get((await auth.$context).authCookies.sessionToken.name);
+			expect(sessionCookie?.value ?? "").toBe("");
+		}
+	});
+
 	test("keeps the default payload strict and accepts valid configured JSON", async () => {
 		const token = await signJwtFromParts({
 			...tokenParts({ role: "member", active: true, level: 2, empty: null }),

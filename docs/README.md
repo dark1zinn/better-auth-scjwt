@@ -64,7 +64,7 @@ Transport selection also defines precedence. The unselected source is ignored ra
 
 Core claims are `iss`, `sub`, `fp`, `iat`, `exp`, `sid`, and `remember`. `remember` is `false` exactly when the issuing response carried a live Better Auth `dontRemember` marker (a `rememberMe: false` sign-in or a re-issuance that inherited it), and it is required: tokens without it are rejected. `getCustomClaims` may add bounded JSON values. The resolver receives the authoritative session and user plus the current `Request` when one exists.
 
-Custom claims are visible signed data, not encrypted profile storage. The implementation limits count, encoded size, nesting, types, and reserved names. Verification reruns the resolver and requires exact JSON equality. This turns current roles or entitlements into short-lived assertions without creating a second revocation database.
+Custom claims are visible signed data, not encrypted profile storage. The implementation limits count, encoded size, nesting, types, and reserved names. Verification reruns the resolver and requires JSON equality: structural, independent of object key order, and by numeric value, so a value JSON normalizes during signing (such as `-0`) still matches its resolver output. This turns current roles or entitlements into short-lived assertions without creating a second revocation database.
 
 ## Fingerprints and proxies
 

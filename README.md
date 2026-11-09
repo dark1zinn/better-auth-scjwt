@@ -168,7 +168,7 @@ Without `getCustomClaims`, every extra payload key is rejected. With a resolver,
 - contain only finite numbers, strings, booleans, null, arrays, and plain objects;
 - not use `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `fp`, `sid`, or `remember`.
 
-The resolver runs again after the session and user are loaded. Presented custom claims must deep-equal the current result. Custom-claim and device-fingerprint mismatches reject the token without deleting its shared backing session.
+The resolver runs again after the session and user are loaded. Presented custom claims must equal the current result under JSON semantics: the comparison is structural, object key order is ignored, and numbers compare by value, so values that JSON normalizes (for example `-0`, which serializes as `0`) still match. Custom-claim and device-fingerprint mismatches reject the token without deleting its shared backing session. A resolver that returns invalid claims at issuance fails the request without delivering a token.
 
 ## IP and proxy configuration
 

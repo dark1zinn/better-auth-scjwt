@@ -180,7 +180,9 @@ export function validateCustomClaims(value: unknown): asserts value is CustomCla
 }
 
 export function jsonValuesEqual(left: JsonValue, right: JsonValue): boolean {
-	if (Object.is(left, right)) {
+	// Strict equality matches JSON semantics: claims are validated finite, and
+	// JSON serializes -0 as 0, so Object.is would reject a round-tripped -0.
+	if (left === right) {
 		return true;
 	}
 	if (Array.isArray(left) || Array.isArray(right)) {
