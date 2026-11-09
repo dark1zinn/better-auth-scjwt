@@ -203,9 +203,11 @@ export function createScjwtHooks(
 /**
  * Builds the request-only headers Better Auth's endpoint sees for a verified
  * SCJWT: the signed native session cookie replaces the presented credential,
- * and the `dontRemember` marker is reconstructed solely from the signed
+ * the `dontRemember` marker is reconstructed solely from the signed
  * `remember` claim so a caller-supplied marker can neither add nor remove
- * Better Auth's no-refresh policy.
+ * Better Auth's no-refresh policy, and cookie-cache (`session_data`) cookies
+ * are dropped so Better Auth reads the session and user from its store
+ * instead of a client-held snapshot.
  */
 async function buildAuthenticatedRequestHeaders(
 	sourceHeaders: Headers,
@@ -215,7 +217,16 @@ async function buildAuthenticatedRequestHeaders(
 	remember: boolean,
 ): Promise<Headers> {
 	const cookies = parseCookies(sourceHeaders.get("cookie") ?? "");
-	cookies.delete(authCookies.dontRememberToken.name);
+	const sessionDataChunkPrefix = `${authCookies.sessionData.name}.`;
+	for (const name of cookies.keys()) {
+		if (
+			name === authCookies.dontRememberToken.name ||
+			name === authCookies.sessionData.name ||
+			name.startsWith(sessionDataChunkPrefix)
+		) {
+			cookies.delete(name);
+		}
+	}
 	cookies.set(
 		authCookies.sessionToken.name,
 		await signRequestCookieValue(nativeToken, secret),

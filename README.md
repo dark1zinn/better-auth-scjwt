@@ -96,6 +96,10 @@ Send the cookie unchanged on subsequent Better Auth requests. The before hook ve
 
 With `secondaryStorage`, `findSession` consults the secondary store first. A session that the secondary store no longer holds is rejected even when `session.preserveSessionInDatabase: true` keeps an unexpired database row for auditing, so evicting or revoking the secondary-store entry revokes the SCJWT.
 
+### Cookie cache
+
+Better Auth's `session.cookieCache` stores a signed `session_data` snapshot in the browser so `getSession` can skip the session store until the snapshot expires. Under SCJWT the snapshot is never the server-side source of truth: for every request with a verified SCJWT, the before hook removes `session_data` (and its chunks) from the request it hands to Better Auth, so `/get-session`, guards built on `auth.api.getSession` such as `@thallesp/nestjs-better-auth`, and other endpoints read the current session and user from the store. Role downgrades, profile changes, and session-field updates therefore take effect on the next request instead of after `cookieCache.maxAge`. Better Auth may still emit `session_data` in responses, and client-side code that reads it (for example a UI session store) can show older data until it refreshes; server authorization is unaffected. A revoked session is rejected before any endpoint runs, with or without a snapshot.
+
 ### Header placement
 
 Header placement emits:

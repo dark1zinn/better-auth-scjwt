@@ -26,6 +26,7 @@ Audit target: Better Auth 1.7.18 session-deletion paths and the next SCJWT-backe
 | Secondary-store eviction | `secondaryStorage` entry removed, row preserved | `findSession` returns null | `401` | Root `test/secondary-storage.test.ts` |
 | Fingerprint mismatch | SCJWT before hook | Keeps session | Mismatched token `401`; bound token remains valid | Root `test/fingerprint-mode.test.ts` |
 | Custom-claim mismatch | SCJWT before hook | Keeps session | `401` | Root `test/custom-claims.test.ts` |
+| Cookie cache snapshot | `session.cookieCache` with a still-fresh `session_data` cookie | Snapshot removed from the SCJWT request; session and user read from the store | Revoked session `401`; live session returns current role and profile | Root `test/session-cache.test.ts`; Nest `rbac` (cookie-cache profile) |
 | Email-OTP sign-in on unverified account | `/sign-in/email-otp` (`revokeUnprovenAccountAccess`) | Deletes pre-proof sessions and linked accounts, then marks email verified | Pre-proof tokens `401` | Nest `combined-plugins` |
 
 Session refresh (`/get-session` past `updateAge`) and `/update-session` re-issue an SCJWT with the same `sid`; sign-out afterwards invalidates both the old and replacement tokens (root `test/native-session.test.ts`).
