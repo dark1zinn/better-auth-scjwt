@@ -96,13 +96,21 @@ function parseSingleSetCookie(
 	return first.done ? null : first.value;
 }
 
+/**
+ * Whether a `Set-Cookie` keeps its cookie alive. An empty value is a clearing
+ * instruction. Per RFC 6265 §5.3, `Max-Age` takes precedence over `Expires`
+ * and a zero or negative `Max-Age` expires the cookie immediately.
+ */
 function isLiveCookie(attributes: {
 	value: string;
 	"max-age"?: number;
 	expires?: Date;
 }): boolean {
-	if (!attributes.value || attributes["max-age"] === 0) {
+	if (!attributes.value) {
 		return false;
+	}
+	if (attributes["max-age"] !== undefined) {
+		return attributes["max-age"] > 0;
 	}
 	return !attributes.expires || attributes.expires.getTime() > Date.now();
 }

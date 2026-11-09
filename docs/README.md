@@ -60,6 +60,8 @@ Better Auth `session.expiresIn` caps token lifetime. Better Auth `session.update
 
 Transport selection also defines precedence. The unselected source is ignored rather than used as a fallback.
 
+"Live" follows RFC 6265 §5.3: an empty value, a zero or negative `Max-Age`, or (when `Max-Age` is absent) a past `Expires` marks a clearing cookie, and `Max-Age` wins over `Expires` when both are present. When a response sets the same cookie more than once, the last entry decides, which is also how the `remember` claim reads Better Auth's `dontRemember` marker.
+
 ## Claims
 
 Core claims are `iss`, `sub`, `fp`, `iat`, `exp`, `sid`, and `remember`. `remember` is `false` exactly when the issuing response carried a live Better Auth `dontRemember` marker (a `rememberMe: false` sign-in or a re-issuance that inherited it), and it is required: tokens without it are rejected. `getCustomClaims` may add bounded JSON values. The resolver receives the authoritative session and user plus the current `Request` when one exists.
@@ -94,5 +96,6 @@ Plain Better Auth `secret` produces an HS256 token without `kid`. Better Auth ve
 - `test/session-cache.test.ts`: compact/jwt/jwe and chunked `session_data` snapshots never override current session and user data, revoked sessions stay rejected, foreign snapshots cannot change the authenticated user, header placement ignores native caches, and refresh plus the non-persistent policy still apply.
 - `test/fingerprint-mode.test.ts`: missing headers, strict mismatch revocation, IP-only behavior, trusted proxies.
 - `test/secondary-storage.test.ts`: database and secondary-storage initialization invariants.
+- `test/token-delivery.test.ts`: cookie lifetime precedence (`Max-Age` over `Expires`, non-positive `Max-Age`, empty values) for replacement and removal in both placements, last-entry liveness, and preservation of unrelated and account cookies.
 - `test/admin-revoke-paths.test.ts`: Better Auth admin ban and session-revoke paths.
 - [`REVOKE_AUDIT.md`](./REVOKE_AUDIT.md): Better Auth 1.7.6 deletion-path audit.

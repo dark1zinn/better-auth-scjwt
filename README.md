@@ -90,7 +90,7 @@ interface ScjwtOptions {
 
 ### Cookie placement
 
-Cookie placement uses the resolved Better Auth session-cookie name and attributes, including `advanced.cookiePrefix`, custom cookie names, and the effective `__Secure-` prefix. The plugin replaces only a live native session-token `Set-Cookie` value with the SCJWT. Native session-data, account-data, and clearing cookies remain intact.
+Cookie placement uses the resolved Better Auth session-cookie name and attributes, including `advanced.cookiePrefix`, custom cookie names, and the effective `__Secure-` prefix. The plugin replaces only a live native session-token `Set-Cookie` value with the SCJWT. Native session-data, account-data, and clearing cookies remain intact. A `Set-Cookie` is a clearing instruction when its value is empty, its `Max-Age` is zero or negative, or (without `Max-Age`) its `Expires` is in the past; as in RFC 6265, `Max-Age` takes precedence over `Expires`.
 
 Send the cookie unchanged on subsequent Better Auth requests. The before hook verifies the SCJWT, then resolves it in two stages: the signed `sid` locates the durable database row only to recover its opaque native `session.token`, and Better Auth's lifecycle-aware `internalAdapter.findSession(token)` decides whether that session is still live and returns the authoritative session and user. The hook signs the opaque token as a request-only Better Auth cookie and lets the normal Better Auth endpoint or middleware consume it.
 
