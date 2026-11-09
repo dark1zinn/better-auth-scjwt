@@ -35,6 +35,9 @@ Each profile file builds its own Better Auth instance through the factory, a uni
 | `username` | `username()` | Normalization, username sign-in, availability, validation, `update-user`, `immutableUsername` |
 | `email-otp` | `emailOTP()` | OTP sign-in/auto-registration, attempts, replay, expiry, resend strategies, verification, password reset revocation, two-stage email change |
 | `combined-plugins` | `admin`, `captcha`, `username`, `emailOTP`, `i18n` | All of the above composed in one application |
+| `two-factor` | `twoFactor({ otpOptions })`, `username`, `admin` | OTP enrollment and disabling rotate the session; password and username sign-in stop at the challenge with no live session cookie; wrong and expired codes and a replayed challenge issue nothing; the verified session is a normal SCJWT session visible to Admin and ended by sign-out |
+
+The `two-factor` profile covers the OTP method only, with codes captured in memory by `sendOTP`. TOTP, backup codes, trusted devices, passkeys, and OAuth-provider MFA are not exercised. Header placement during a pending challenge is covered by the root suite (`test/lifecycle-finalization.test.ts`), where the challenge cookie is the only cookie the client must return.
 
 Within a profile file, cases share only the Nest application and local fixtures. In `combined-plugins` every case signs up its own users and administrators with unique addresses, proves email ownership through the real OTP flow where it needs it, and uses its own clients, so a case passes on its own (`-t "<title>"`), in any order (`--sequence.shuffle`), and does not depend on accounts, tokens, or passwords left behind by another case.
 

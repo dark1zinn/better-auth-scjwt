@@ -4,6 +4,7 @@ import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import { parseSetCookieHeader, setSessionCookie } from "better-auth/cookies";
+import { twoFactor } from "better-auth/plugins/two-factor";
 import { kAPIErrorHeaderSymbol } from "better-call";
 import { decodeJwt } from "jose";
 import { scjwt } from "../src/plugin/index";
@@ -325,5 +326,74 @@ describe("terminal SCJWT session finalizer", () => {
 			plugins: [scjwt(), scjwt()],
 		});
 		await expect(auth.$context).rejects.toThrow("[scjwt] register scjwt() exactly once.");
+	});
+
+	test("header placement withholds the token while a two-factor challenge is pending", async () => {
+		const codes = new Map<string, string>();
+		const db = { ...createMemoryDB(), twoFactor: [] };
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [
+				scjwt({ tokenPlacement: "header" }),
+				twoFactor({
+					otpOptions: {
+						sendOTP: async ({ user, otp }) => {
+							codes.set(user.id, otp);
+						},
+					},
+				}),
+			],
+		});
+		const email = "header-two-factor@example.com";
+		const issued = await signUpWithScjwt(auth, email);
+		const json = (headers: HeadersInit, cookie?: string) => {
+			const result = new Headers(headers);
+			result.set("content-type", "application/json");
+			if (cookie) result.set("cookie", cookie);
+			return result;
+		};
+		const post = (path: string, headers: Headers, body: object) =>
+			auth.handler(
+				new Request(`${TEST_BASE_URL}/api/auth${path}`, {
+					method: "POST",
+					headers,
+					body: JSON.stringify(body),
+				}),
+			);
+		const enabled = await post("/two-factor/enable", json(bearerHeaders(issued.token)), {
+			password: PASSWORD,
+			method: "otp",
+		});
+		expect(enabled.status).toBe(200);
+		expect(enabled.headers.get("set-auth-token")?.split(".")).toHaveLength(3);
+
+		const pending = await post("/sign-in/email", json(STABLE_HEADERS), {
+			email,
+			password: PASSWORD,
+		});
+		expect(pending.status).toBe(200);
+		expect(await pending.json()).toMatchObject({ twoFactorRedirect: true });
+		expect(pending.headers.get("set-auth-token")).toBeNull();
+		// The challenge itself is a Better Auth cookie the client must return.
+		const challenge = pending.headers
+			.getSetCookie()
+			.map((value) => value.split(";")[0] ?? "")
+			.find((pair) => /two_factor=.+/.test(pair));
+		expect(challenge).toBeDefined();
+
+		expect(
+			(await post("/two-factor/send-otp", json(STABLE_HEADERS, challenge), {})).status,
+		).toBe(200);
+		const verified = await post("/two-factor/verify-otp", json(STABLE_HEADERS, challenge), {
+			code: codes.get(db.user[0]?.id ?? ""),
+		});
+		expect(verified.status).toBe(200);
+		const token = verified.headers.get("set-auth-token");
+		expect(token?.split(".")).toHaveLength(3);
+		const session = await requestSession(auth, bearerHeaders(token ?? ""));
+		expect(await session.json()).toMatchObject({ user: { email } });
 	});
 });
