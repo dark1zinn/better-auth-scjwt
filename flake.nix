@@ -29,6 +29,7 @@
           default = pkgs.mkShellNoCC {
             packages = with pkgs; [
               bun
+              nodejs_24
               self.formatter.${system}
             ];
           };

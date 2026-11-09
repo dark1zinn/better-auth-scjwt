@@ -202,6 +202,8 @@ This is a clean cutover; removed options and the old cookie name have no compati
 
 ## Development
 
+Tested toolchain: Bun 1.4.2 and Node.js 24 (>= 24.11.0). Bun runs the tests, build, and the NestJS example; Node.js is required by Node-based tooling and by the packed-consumer checks. `nix develop` (or `direnv allow`) provides both from `flake.nix`.
+
 ```bash
 bun install
 bun test
