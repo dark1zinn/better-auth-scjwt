@@ -105,3 +105,72 @@ describe("session token delivery honors cookie lifetime precedence", () => {
 		}
 	});
 });
+
+describe("session token delivery transport details", () => {
+	test("cookie placement keeps every native attribute on the substituted SCJWT", async () => {
+		const cookies = await authCookies();
+		const native = `${cookies.sessionToken.name}=native; Path=/app; Domain=example.com; Max-Age=600; HttpOnly; Secure; SameSite=None; Partitioned`;
+		const [result] = deliver([native], "cookie", cookies);
+		const parsed = parseSetCookieHeader(result ?? "").get(cookies.sessionToken.name);
+		expect(parsed).toMatchObject({
+			value: TOKEN,
+			path: "/app",
+			domain: "example.com",
+			"max-age": 600,
+			httponly: true,
+			secure: true,
+			samesite: "none",
+			partitioned: true,
+		});
+	});
+
+	test("header placement removes live session-data chunks and markers but keeps clearing chunks", async () => {
+		const cookies = await authCookies();
+		const data = cookies.sessionData.name;
+		const kept = [`${data}.1=; Max-Age=0`, "app_pref=dark"];
+		const result = deliver(
+			[
+				`${cookies.sessionToken.name}=native; Max-Age=600`,
+				`${data}.0=chunk-zero; Max-Age=300`,
+				...kept,
+				`${cookies.dontRememberToken.name}=true.signature`,
+			],
+			"header",
+			cookies,
+		);
+		expect(result).toEqual(kept);
+	});
+
+	test("falls back to splitting a combined Set-Cookie header", async () => {
+		const cookies = await authCookies();
+		const headers = new Headers();
+		headers.append(
+			"set-cookie",
+			`${cookies.sessionToken.name}=native; Expires=${FUTURE}; Path=/`,
+		);
+		headers.append("set-cookie", `app_pref=dark; Expires=${FUTURE}`);
+		// Runtimes without Headers#getSetCookie only expose the comma-joined value.
+		Object.defineProperty(headers, "getSetCookie", { value: undefined });
+		deliverSessionToken(headers, TOKEN, "cookie", cookies);
+		const delivered = parseSetCookieHeader(headers.get("set-cookie") ?? "");
+		expect(delivered.get(cookies.sessionToken.name)?.value).toBe(TOKEN);
+		expect(delivered.get("app_pref")?.value).toBe("dark");
+	});
+
+	test("header placement exposes set-auth-token once and keeps other exposed headers", async () => {
+		const cookies = await authCookies();
+		const headers = new Headers({
+			"access-control-expose-headers": "X-Request-Id, Set-Auth-Token,  ",
+			"x-request-id": "abc",
+		});
+		deliverSessionToken(headers, TOKEN, "header", cookies);
+		deliverSessionToken(headers, TOKEN, "header", cookies);
+		const exposed = (headers.get("access-control-expose-headers") ?? "")
+			.split(",")
+			.map((name) => name.trim().toLowerCase());
+		expect(exposed.filter((name) => name === "set-auth-token")).toHaveLength(1);
+		expect(exposed).toContain("x-request-id");
+		expect(headers.get("x-request-id")).toBe("abc");
+		expect(headers.get("set-auth-token")).toBe(TOKEN);
+	});
+});
