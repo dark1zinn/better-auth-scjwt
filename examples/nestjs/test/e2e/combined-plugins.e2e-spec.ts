@@ -409,6 +409,19 @@ describe('NestJS combined-plugins profile', () => {
   });
 
   it('resets the password, revokes pre-reset sessions, and signs in with the replacement password', async () => {
+    const liveTokens: string[] = [];
+    for (let device = 0; device < 2; device += 1) {
+      const signin = await post(
+        harness.createClient(),
+        '/api/auth/sign-in/email',
+        { email: userEmail, password: OLD_PASSWORD },
+      );
+      expect(signin.status).toBe(200);
+      liveTokens.push(expectScjwt(signin, cookieName));
+    }
+    for (const token of liveTokens) {
+      expect((await harness.getWithToken('/me', token)).status).toBe(200);
+    }
     const request = await post(
       harness.createClient(),
       '/api/auth/email-otp/request-password-reset',
@@ -427,7 +440,9 @@ describe('NestJS combined-plugins profile', () => {
     expect(reset.status).toBe(200);
     expect(reset.body).toEqual({ success: true });
     expectNoScjwt(reset, cookieName);
-    expect((await harness.getWithToken('/me', otpToken)).status).toBe(401);
+    for (const token of liveTokens) {
+      expect((await harness.getWithToken('/me', token)).status).toBe(401);
+    }
     const old = await post(harness.createClient(), '/api/auth/sign-in/email', {
       email: userEmail,
       password: OLD_PASSWORD,

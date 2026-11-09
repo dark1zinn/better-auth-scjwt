@@ -15,7 +15,7 @@ Audit target: Better Auth 1.7.18 session-deletion paths and the next SCJWT-backe
 | Change password, default | `/change-password` | Keeps existing sessions | Token remains valid to effective expiry | Better Auth 1.7.18 source audit |
 | Change password with revoke | `revokeOtherSessions: true` | Deletes others; re-issues current | Revoked tokens `401`; replacement valid | Nest `scjwt-only` |
 | Password reset (core) | `/request-password-reset` + `/reset-password` | Deletes sessions only with `emailAndPassword.revokeSessionsOnPasswordReset: true` | `401` when configured | Root `test/native-session.test.ts` |
-| Password reset (email OTP) | `/email-otp/reset-password` | Same setting as core reset | `401` when configured | Nest `email-otp`, `combined-plugins` |
+| Password reset (email OTP) | `/email-otp/reset-password` | Same setting as core reset | `401` when configured | Nest `email-otp`; `combined-plugins` (two sessions proven live via `/me` immediately before the reset, both `401` after) |
 | Delete user (self) | `/delete-user` | Deletes user and sessions | `401` | Root `test/native-session.test.ts` |
 | Admin ban | `/admin/ban-user` | Deletes all target sessions | `401` | Root `test/admin-revoke-paths.test.ts`; Nest `admin`, `combined-plugins` |
 | Admin revoke one | `/admin/revoke-user-session` | Deletes target session | `401` | Root `test/admin-revoke-paths.test.ts`; Nest `admin`, `combined-plugins` |
