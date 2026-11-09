@@ -9,7 +9,7 @@
   "scripts": {
     "prebuild": "bun run sync:scjwt",
     "build": "nest build",
-    "auth:migrate": "bunx --bun auth@latest migrate --config ./src/auth.ts --yes",
+    "auth:migrate": "bunx --bun auth migrate --config ./src/auth.ts --yes",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start --exec bun",
     "start:dev": "nest start --watch --exec bun",
@@ -46,6 +46,7 @@
     "@types/node": "^24.0.0",
     "@types/supertest": "^7.0.0",
     "@vitest/coverage-v8": "^4.1.2",
+    "auth": "1.7.18",
     "oxlint": "^1.58.0",
     "oxlint-tsgolint": "^7.0.2001",
     "prettier": "^3.4.2",

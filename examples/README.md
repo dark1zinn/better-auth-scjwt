@@ -75,4 +75,4 @@ bun run --cwd examples/nestjs start:dev
 - `BETTER_AUTH_URL`: externally reachable application base URL;
 - `BETTER_AUTH_SECRET`: high-entropy secret with at least 32 characters.
 
-The migration command uses Better Auth's CLI through `bunx --bun`; no Node runtime is required.
+`auth:migrate` runs the Better Auth CLI (`auth`) pinned as an exact `1.7.18` dev dependency and locked in `bun.lock`, so migrations always use the same Better Auth line as the application rather than whatever `auth@latest` resolves to. It runs under Bun (`bunx --bun`) and is idempotent: a second run reports that no migrations are needed. Upgrade it together with `better-auth`.
