@@ -1,6 +1,6 @@
 # better-auth-scjwt
 
-Session-Centric JWT transport for [Better Auth](https://better-auth.com). The plugin replaces the client-visible session token with an HS256 JWT while keeping the Better Auth database session row authoritative. Deleting or expiring that row invalidates the JWT on its next use.
+Session-Centric JWT transport for [Better Auth](https://better-auth.com). The plugin replaces the client-visible session token with an HS256 JWT while keeping Better Auth's server-side session authoritative: the signed `sid` locates the durable database row, and Better Auth's `internalAdapter.findSession` (which consults `secondaryStorage` when configured) decides on every request whether that session is still live. Deleting, revoking, or expiring the session invalidates the JWT on its next use.
 
 ## Install
 
@@ -189,7 +189,9 @@ betterAuth({
 });
 ```
 
-Do not trust forwarding headers from origins directly reachable by clients. `ip-only` relaxes browser-header binding; it does not disable IP binding.
+Do not trust forwarding headers from origins directly reachable by clients: without a proxy that overwrites the header, a client chooses its own `X-Forwarded-For`.
+
+The fingerprint constrains replay; it is not proof of device possession. User-Agent and `Sec-CH-UA-Platform` are client-supplied, and the IP is only as trustworthy as your proxy configuration. When Better Auth resolves no client IP (in production: no configured header present, a multi-hop chain with no `trustedProxies`, or `ipAddress.disableIpTracking`), SCJWT hashes an empty IP. `strict` mode then still binds the browser headers, while `ip-only` binds nothing at all. This keeps server-to-server and IP-less deployments working; configure `ipAddressHeaders` and `trustedProxies` if you rely on IP binding. Tokens issued through direct `auth.api` calls are bound to the headers of that call, so a token minted for a browser must be issued with the browser's request headers.
 
 ## Security model
 
@@ -201,7 +203,8 @@ Do not trust forwarding headers from origins directly reachable by clients. `ip-
 - Custom-claim mismatch returns `401` without deleting the session.
 - CSRF: cookie placement is an ambient credential, and Better Auth's origin check rejects state-changing requests from untrusted or missing `Origin` exactly as for native session cookies. Header placement is not ambient (a script must attach `Authorization`), so Better Auth does not origin-check Bearer requests; restrict callers with CORS. Better Auth disables its origin check when `NODE_ENV` is `test` unless `advanced.disableOriginCheck` is set to `false`.
 - Direct `auth.api` calls do not pass through Better Auth's HTTP router, so its origin and CSRF checks do not run; routes that forward browser headers to `auth.api` must validate `Origin` themselves (see Better Auth's [security reference](https://better-auth.com/docs/reference/security)).
-- Revocation audit: [`docs/REVOKE_AUDIT.md`](./docs/REVOKE_AUDIT.md).
+- Do not register Better Auth's `bearer()` plugin with `scjwt()`. Both own the session transport, and in cookie placement `bearer()` turns the native session token returned in sign-in and sign-up response bodies into an authenticated session without SCJWT's fingerprint and claim checks.
+- Revocation audit: [`docs/REVOKE_AUDIT.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/REVOKE_AUDIT.md). Security review and known limitations: [`docs/SECURITY_REVIEW.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/SECURITY_REVIEW.md).
 
 ## Migration
 
@@ -234,7 +237,7 @@ bun run test:package
 
 `bun run typecheck` checks `src` with the strict, isolated-declaration settings used for publishing (`tsconfig.json`) and then `src`, `test`, and `scripts` together (`tsconfig.test.json`), so the integration suites that carry the security guarantees are type-checked too. The packed-consumer fixtures in `test/consumer` are excluded there because `test:package` checks them under their own module-resolution settings. `bun run --cwd examples/nestjs typecheck` does the same for the NestJS example.
 
-The root integration suite exercises real Better Auth endpoints with the memory adapter and test-utils plugin. The NestJS example adds isolated HTTP profiles for SCJWT alone, Admin, Admin RBAC, i18n, captcha, username, email OTP, two-factor, and the combined plugins; see [`examples/README.md`](./examples/README.md).
+The root integration suite exercises real Better Auth endpoints with the memory adapter and test-utils plugin. The NestJS example adds isolated HTTP profiles for SCJWT alone, Admin, Admin RBAC, i18n, captcha, username, email OTP, two-factor, and the combined plugins; see [`examples/README.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/examples/README.md).
 
 ### Continuous integration
 

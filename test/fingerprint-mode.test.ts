@@ -130,4 +130,119 @@ describe("fingerprint modes", () => {
 		);
 		expect(matchingResponse.status).toBe(200);
 	});
+
+	test("without a resolvable IP, strict mode binds only browser headers and ip-only binds nothing", async () => {
+		for (const fingerprintMode of ["strict", "ip-only"] as const) {
+			const auth = betterAuth({
+				database: memoryAdapter(createMemoryDB()),
+				baseURL: TEST_BASE_URL,
+				secret: TEST_SECRET,
+				emailAndPassword: { enabled: true },
+				// getIP returns null, as in production when no trustworthy client IP is available.
+				advanced: { ipAddress: { disableIpTracking: true } },
+				plugins: [scjwt({ fingerprintMode })],
+			});
+			const issued = await signUpWithScjwt(auth, `${fingerprintMode}-no-ip@example.com`, {
+				"user-agent": "browser-a",
+				"x-forwarded-for": "203.0.113.20",
+			});
+			const otherIp = await requestSession(
+				auth,
+				createCookieHeaders(issued.cookieName, issued.token, {
+					"user-agent": "browser-a",
+					"x-forwarded-for": "198.51.100.7",
+				}),
+			);
+			expect(otherIp.status).toBe(200);
+			const otherBrowser = await requestSession(
+				auth,
+				createCookieHeaders(issued.cookieName, issued.token, {
+					"user-agent": "browser-b",
+					"sec-ch-ua-platform": '"Windows"',
+					"x-forwarded-for": "198.51.100.7",
+				}),
+			);
+			expect(otherBrowser.status).toBe(fingerprintMode === "strict" ? 401 : 200);
+		}
+	});
+
+	test("binds IPv6 clients to the configured subnet", async () => {
+		const auth = betterAuth({
+			database: memoryAdapter(createMemoryDB()),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			advanced: { ipAddress: { ipAddressHeaders: ["x-forwarded-for"], ipv6Subnet: 64 } },
+			plugins: [scjwt({ fingerprintMode: "ip-only" })],
+		});
+		const issued = await signUpWithScjwt(auth, "ipv6-subnet@example.com", {
+			"x-forwarded-for": "2001:db8:1:2::1",
+		});
+		const sameSubnet = await requestSession(
+			auth,
+			createCookieHeaders(issued.cookieName, issued.token, {
+				"x-forwarded-for": "2001:db8:1:2:ffff:ffff:ffff:ffff",
+			}),
+		);
+		expect(sameSubnet.status).toBe(200);
+		const otherSubnet = await requestSession(
+			auth,
+			createCookieHeaders(issued.cookieName, issued.token, {
+				"x-forwarded-for": "2001:db8:1:3::1",
+			}),
+		);
+		expect(otherSubnet.status).toBe(401);
+	});
+
+	test("ignores multi-hop forwarded chains when no proxy is trusted", async () => {
+		const auth = betterAuth({
+			database: memoryAdapter(createMemoryDB()),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			advanced: { ipAddress: { ipAddressHeaders: ["x-forwarded-for"] } },
+			plugins: [scjwt({ fingerprintMode: "ip-only" })],
+		});
+		const issued = await signUpWithScjwt(auth, "untrusted-chain@example.com", {
+			"x-forwarded-for": "203.0.113.20, 192.0.2.10",
+		});
+		// Neither chain yields a trustworthy client IP, so the IP cannot distinguish them.
+		const response = await requestSession(
+			auth,
+			createCookieHeaders(issued.cookieName, issued.token, {
+				"x-forwarded-for": "198.51.100.7, 192.0.2.99",
+			}),
+		);
+		expect(response.status).toBe(200);
+	});
+
+	test("tokens issued by direct server calls are bound to the server's request context", async () => {
+		const auth = betterAuth({
+			database: memoryAdapter(createMemoryDB()),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [scjwt({ tokenPlacement: "header" })],
+		});
+		const { headers } = await auth.api.signUpEmail({
+			body: {
+				name: "Server Issued",
+				email: "server-issued@example.com",
+				password: "correct-horse-battery-staple",
+			},
+			headers: new Headers({ "user-agent": "backend-service" }),
+			returnHeaders: true,
+		});
+		const token = headers.get("set-auth-token") ?? "";
+		const browser = await requestSession(
+			auth,
+			new Headers({ "user-agent": "browser", authorization: `Bearer ${token}` }),
+		);
+		expect(browser.status).toBe(401);
+		const server = await requestSession(
+			auth,
+			new Headers({ "user-agent": "backend-service", authorization: `Bearer ${token}` }),
+		);
+		expect(server.status).toBe(200);
+	});
 });

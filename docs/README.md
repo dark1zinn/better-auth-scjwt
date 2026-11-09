@@ -1,12 +1,12 @@
 # Native Session-Centric JWT architecture
 
-A Session-Centric JWT is a signed client transport for a server-side session, not a stateless replacement for one. `better-auth-scjwt` signs the Better Auth session-row ID and device constraints into a JWT while preserving Better Auth's database as the only authorization source of truth.
+A Session-Centric JWT is a signed client transport for a server-side session, not a stateless replacement for one. `better-auth-scjwt` signs the Better Auth session-row ID and device constraints into a JWT while leaving authorization to Better Auth's session store: the durable row maps `sid` to the native token, and `internalAdapter.findSession` (secondary storage first, when configured) decides liveness and returns the current session and user.
 
 ## Why retain a session row?
 
 A purely stateless access token remains usable until its cryptographic expiry unless the application adds a revocation list. A canonical session row provides immediate revocation through the same operations Better Auth already uses for sign-out, password security, administration, and user deletion.
 
-SCJWT intentionally performs a database read for each presented token. The JWT protects the pointer and selected claims from tampering; it does not remove the authoritative lookup.
+SCJWT intentionally performs authoritative reads for each presented token: one durable-row lookup by `sid`, then Better Auth's lifecycle-aware `findSession` (a secondary-storage read when configured, otherwise another database read), plus whatever the endpoint itself reads. The JWT protects the pointer and selected claims from tampering; it does not remove the authoritative lookup. Do not remove these reads to save latency without measuring; they are what makes revocation immediate.
 
 | Property | Stateless JWT | Opaque database session | SCJWT |
 |---|---|---|---|
@@ -21,14 +21,19 @@ SCJWT intentionally performs a database read for each presented token. The JWT p
 ```mermaid
 flowchart TD
   A[Configured cookie or Bearer token] --> B[Verify HS256, kid, issuer, exp, and payload]
-  B --> C[Load session row by sid]
-  C --> D[Check subject and effective expiry]
+  B -->|Invalid| X[Return 401]
+  B --> C[Load durable session row by sid]
+  C --> L[internalAdapter.findSession on the row's native token]
+  L -->|Missing, revoked, or another session| X
+  L -->|Store unavailable| Y[Fail with 500, issue nothing]
+  L --> D[Check subject and effective expiry]
   D --> E[Recompute fingerprint]
   E -->|Mismatch| F[Keep session and return 401]
-  E -->|Match| G[Load user and recompute custom claims]
+  E -->|Match| G[Recompute custom claims from the current session and user]
   G -->|Mismatch| H[Keep session and return 401]
-  G -->|Match| I[Sign opaque session.token and, when remember is false, the dontRemember marker as request-only Better Auth cookies]
+  G -->|Match| I[Request-only cookies: signed native token, dontRemember when remember is false, no session_data]
   I --> J[Run normal Better Auth endpoint and middleware]
+  J --> K[Session finalizer after all plugin after-hooks issues a replacement SCJWT on success]
 ```
 
 The injected cookies never replace the response transport. They exist only in the current request headers so Better Auth's native `getSession`, sensitive-session middleware, account endpoints, and third-party plugins follow their standard path. A caller-supplied `dontRemember` cookie is always discarded; the marker comes only from the signed `remember` claim. Cookie-cache `session_data` cookies (including chunks) are removed from the same request, so a client-held snapshot can never replace the session and user that `internalAdapter.findSession` just returned, even when `session.cookieCache` is enabled.
@@ -72,7 +77,9 @@ Custom claims are visible signed data, not encrypted profile storage. The implem
 
 `strict` mode hashes Better Auth's resolved IP, User-Agent, and `Sec-CH-UA-Platform`. `ip-only` hashes the same IP with canonical empty browser fields. Missing optional browser headers are therefore deterministic.
 
-IP selection is delegated to Better Auth's `advanced.ipAddress.ipAddressHeaders`, `trustedProxies`, and `ipv6Subnet`. Keeping one resolver avoids divergent rate-limit, session-tracking, and SCJWT identities.
+IP selection is delegated to Better Auth's `advanced.ipAddress.ipAddressHeaders`, `trustedProxies`, and `ipv6Subnet`. Keeping one resolver avoids divergent rate-limit, session-tracking, and SCJWT identities. IPv6 clients are bound to the configured subnet, and without `trustedProxies` Better Auth trusts only single-value forwarded headers.
+
+The fingerprint is a replay constraint, not device proof: browser headers are client-supplied and IPs are only as reliable as the proxy chain. When `getIP` resolves nothing (production without a usable header, untrusted multi-hop chains, or `disableIpTracking`; development and test fall back to `127.0.0.1`), SCJWT hashes an empty IP, so `strict` binds only browser headers and `ip-only` binds nothing. This is deliberate compatibility for server-to-server and IP-less deployments. Tokens issued by direct `auth.api` calls are bound to the headers passed to that call.
 
 ## Storage invariant
 
@@ -95,9 +102,10 @@ Plain Better Auth `secret` produces an HS256 token without `kid`. Better Auth ve
 - `test/lifecycle-finalization.test.ts`: terminal finalizer ordering, late denial and session withdrawal or substitution, HTTP and direct `auth.api` parity, shared plugin instances, finalizer-position and duplicate-registration guards.
 - `test/session-lifetime.test.ts`: `rememberMe: false` sessions in both placements keep their native expiry without sliding, remembered sessions refresh, supplied `dontRemember` cookies are ignored, re-issuance inherits the policy, and a remembered sign-in replaces a non-persistent session.
 - `test/session-cache.test.ts`: compact/jwt/jwe and chunked `session_data` snapshots never override current session and user data, revoked sessions stay rejected, foreign snapshots cannot change the authenticated user, header placement ignores native caches, and refresh plus the non-persistent policy still apply.
-- `test/fingerprint-mode.test.ts`: missing headers, strict mismatch revocation, IP-only behavior, trusted proxies.
+- `test/fingerprint-mode.test.ts`: missing headers, strict mismatch rejection without session deletion, IP-only behavior, trusted proxies, missing-IP behavior in both modes, IPv6 subnet binding, untrusted multi-hop chains, and direct `auth.api` issuance bound to the server's request context.
 - `test/secondary-storage.test.ts`: database and secondary-storage initialization invariants, preserved-row eviction, fail-closed `500` without credentials for session-row and secondary-storage read failures (no fallback between stores), rejection when the store resolves a different session than `sid`, and a refresh deterministically paused while the session is revoked.
 - `test/refresh-policy.test.ts`: `disableSessionRefresh`, the `disableRefresh` query, deferred GET/POST refresh, `freshAge` on fresh-session routes, default and revoking password changes, and password reset without configured revocation.
 - `test/token-delivery.test.ts`: cookie lifetime precedence (`Max-Age` over `Expires`, non-positive `Max-Age`, empty values) for replacement and removal in both placements, last-entry liveness, preservation of every native attribute (`Path`, `Domain`, `Max-Age`, `HttpOnly`, `Secure`, `SameSite`, `Partitioned`), removal of live session-data chunks in header placement, combined `Set-Cookie` fallback splitting, single `set-auth-token` exposure, and preservation of unrelated and account cookies and headers.
 - `test/admin-revoke-paths.test.ts`: Better Auth admin ban and session-revoke paths.
-- [`REVOKE_AUDIT.md`](./REVOKE_AUDIT.md): Better Auth 1.7.6 deletion-path audit.
+- [`REVOKE_AUDIT.md`](./REVOKE_AUDIT.md): Better Auth 1.7.18 deletion-path audit.
+- [`SECURITY_REVIEW.md`](./SECURITY_REVIEW.md): findings, fixes, evidence, and remaining limitations from the security and lifecycle review.
