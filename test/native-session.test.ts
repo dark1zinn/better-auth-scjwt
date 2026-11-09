@@ -15,6 +15,7 @@ import {
 	createCookieHeaders,
 	createMemoryDB,
 	requestSession,
+	rowAt,
 	signUpWithScjwt,
 } from "./helpers/native-auth";
 
@@ -139,7 +140,7 @@ describe("native Better Auth session transport", () => {
 		expect(body.user.email).toBe("native-cookie@example.com");
 
 		const payload = decodeJwt(issued.token);
-		const backingSession = db.session[0];
+		const backingSession = rowAt(db.session);
 		expect(payload.exp).toBeLessThanOrEqual(
 			Math.floor(new Date(backingSession.expiresAt).getTime() / 1000),
 		);
@@ -210,7 +211,7 @@ describe("native Better Auth session transport", () => {
 
 		const serializedNativeCookie = await serializeSignedCookie(
 			"",
-			db.session[0].token,
+			rowAt(db.session).token,
 			context.secret,
 		);
 		const nativeSessionCookie = decodeURIComponent(
@@ -461,7 +462,7 @@ describe("native Better Auth session transport", () => {
 		});
 		const issued = await signUpWithScjwt(auth, "refresh@example.com");
 		const sessionId = decodeJwt(issued.token).sid;
-		const expiresBefore = new Date(db.session[0].expiresAt).getTime();
+		const expiresBefore = new Date(rowAt(db.session).expiresAt).getTime();
 		// Advance the mocked clock so the refresh changes iat/expiresAt without sleeping.
 		setSystemTime(new Date(Date.now() + 2000));
 		let refreshed: Response;
@@ -478,7 +479,7 @@ describe("native Better Auth session transport", () => {
 		expect(replacement.split(".")).toHaveLength(3);
 		expect(replacement).not.toBe(issued.token);
 		expect(decodeJwt(replacement).sid).toBe(sessionId);
-		expect(new Date(db.session[0].expiresAt).getTime()).toBeGreaterThan(
+		expect(new Date(rowAt(db.session).expiresAt).getTime()).toBeGreaterThan(
 			expiresBefore,
 		);
 
@@ -669,9 +670,9 @@ describe("core Better Auth revocation paths", () => {
 });
 
 describe("HTTP transport boundaries", () => {
-	function createAuth(tokenPlacement: "cookie" | "header") {
+	function createAuth(tokenPlacement: "cookie" | "header", db = createMemoryDB()) {
 		return betterAuth({
-			database: memoryAdapter(createMemoryDB()),
+			database: memoryAdapter(db),
 			baseURL: TEST_BASE_URL,
 			secret: TEST_SECRET,
 			emailAndPassword: { enabled: true },
@@ -730,15 +731,19 @@ describe("HTTP transport boundaries", () => {
 
 	test("a present but invalid credential never falls back to the other transport", async () => {
 		const db = createMemoryDB();
-		const auth = createAuth("header");
+		const auth = createAuth("header", db);
 		const issued = await signUpWithScjwt(auth, "no-fallback-header@example.com");
 		const context = await auth.$context;
+		// A validly signed native session cookie for the live session.
 		const nativeCookie = decodeURIComponent(
-			(await serializeSignedCookie("", db.session[0]?.token ?? "", context.secret)).replace(
+			(await serializeSignedCookie("", rowAt(db.session).token, context.secret)).replace(
 				"=",
 				"",
 			),
 		);
+		const nativeOnly = createCookieHeaders(issued.cookieName, nativeCookie);
+		// Header placement ignores the native cookie entirely when no Bearer is present.
+		expect(await (await requestSession(auth, nativeOnly)).json()).toBeNull();
 		const headers = createCookieHeaders(issued.cookieName, nativeCookie);
 		headers.set("authorization", "Bearer not.a.jwt");
 		expect((await requestSession(auth, headers)).status).toBe(401);

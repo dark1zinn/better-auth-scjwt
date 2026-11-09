@@ -1,7 +1,7 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
 import type { BetterAuthOptions } from "better-auth";
 import { betterAuth } from "better-auth";
-import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
+import { memoryAdapter } from "better-auth/adapters/memory";
 import { parseSetCookieHeader } from "better-auth/cookies";
 import { decodeJwt } from "jose";
 import { scjwt } from "../src/plugin/index";
@@ -12,14 +12,16 @@ import {
 	createCookieHeaders,
 	createMemoryDB,
 	requestSession,
+	rowAt,
 	signUpWithScjwt,
+	type TestDB,
 } from "./helpers/native-auth";
 
 const PASSWORD = "correct-horse-battery-staple";
 const NEW_PASSWORD = "correct-horse-battery-staple-2";
 
 function createAuth(
-	db: MemoryDB,
+	db: TestDB,
 	session: BetterAuthOptions["session"] = {},
 	emailAndPassword: Partial<NonNullable<BetterAuthOptions["emailAndPassword"]>> = {},
 ) {
@@ -76,20 +78,20 @@ describe("Better Auth refresh policies", () => {
 		const db = createMemoryDB();
 		const auth = createAuth(db, { expiresIn: 3600, updateAge: 0, disableSessionRefresh: true });
 		const issued = await signUpWithScjwt(auth, "no-refresh@example.com");
-		const before = new Date(db.session[0].expiresAt).getTime();
+		const before = new Date(rowAt(db.session).expiresAt).getTime();
 		const response = await at(2000, () =>
 			requestSession(auth, createCookieHeaders(issued.cookieName, issued.token)),
 		);
 		expect(response.status).toBe(200);
 		expect(issuedCookieToken(response, issued.cookieName)).toBeUndefined();
-		expect(new Date(db.session[0].expiresAt).getTime()).toBe(before);
+		expect(new Date(rowAt(db.session).expiresAt).getTime()).toBe(before);
 	});
 
 	test("the disableRefresh query keeps expiry and issues no replacement", async () => {
 		const db = createMemoryDB();
 		const auth = createAuth(db, { expiresIn: 3600, updateAge: 0 });
 		const issued = await signUpWithScjwt(auth, "query-no-refresh@example.com");
-		const before = new Date(db.session[0].expiresAt).getTime();
+		const before = new Date(rowAt(db.session).expiresAt).getTime();
 		const response = await at(2000, () =>
 			auth.handler(
 				new Request(`${TEST_BASE_URL}/api/auth/get-session?disableRefresh=true`, {
@@ -99,7 +101,7 @@ describe("Better Auth refresh policies", () => {
 		);
 		expect(response.status).toBe(200);
 		expect(issuedCookieToken(response, issued.cookieName)).toBeUndefined();
-		expect(new Date(db.session[0].expiresAt).getTime()).toBe(before);
+		expect(new Date(rowAt(db.session).expiresAt).getTime()).toBe(before);
 	});
 
 	test("deferred refresh reads on GET and rotates the transport on POST", async () => {
@@ -107,19 +109,19 @@ describe("Better Auth refresh policies", () => {
 		const auth = createAuth(db, { expiresIn: 3600, updateAge: 0, deferSessionRefresh: true });
 		const issued = await signUpWithScjwt(auth, "deferred@example.com");
 		const headers = createCookieHeaders(issued.cookieName, issued.token);
-		const before = new Date(db.session[0].expiresAt).getTime();
+		const before = new Date(rowAt(db.session).expiresAt).getTime();
 
 		const read = await at(2000, () => requestSession(auth, headers));
 		expect(read.status).toBe(200);
 		expect(await read.json()).toMatchObject({ needsRefresh: true });
 		expect(issuedCookieToken(read, issued.cookieName)).toBeUndefined();
-		expect(new Date(db.session[0].expiresAt).getTime()).toBe(before);
+		expect(new Date(rowAt(db.session).expiresAt).getTime()).toBe(before);
 
 		const refreshed = await at(2000, () => post(auth, "/get-session", headers));
 		expect(refreshed.status).toBe(200);
 		const replacement = issuedCookieToken(refreshed, issued.cookieName);
 		expect(decodeJwt(replacement ?? "").sid).toBe(decodeJwt(issued.token).sid);
-		expect(new Date(db.session[0].expiresAt).getTime()).toBeGreaterThan(before);
+		expect(new Date(rowAt(db.session).expiresAt).getTime()).toBeGreaterThan(before);
 	});
 
 	test("freshAge gates fresh-session routes without ending the session", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
 import { betterAuth } from "better-auth";
-import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
+import { memoryAdapter } from "better-auth/adapters/memory";
 import { parseSetCookieHeader } from "better-auth/cookies";
 import { decodeJwt, decodeProtectedHeader, SignJWT, type JWTPayload } from "jose";
 import { scjwt } from "../src/plugin/index";
@@ -11,6 +11,8 @@ import {
 	createMemoryDB,
 	requestSession,
 	signUpWithScjwt,
+	type TestAuth,
+	type TestDB,
 } from "./helpers/native-auth";
 
 const PASSWORD = "correct-horse-battery-staple";
@@ -19,10 +21,10 @@ const SECRET_V1 = "rotation-secret-version-one-at-least-32-bytes";
 const SECRET_V2 = "rotation-secret-version-two-at-least-32-bytes";
 
 type Claims = Record<string, unknown>;
-type Auth = { handler(request: Request): Promise<Response>; $context: Promise<{ authCookies: { sessionToken: { name: string } } }> };
+type Auth = TestAuth;
 
 function createAuth(
-	db: MemoryDB,
+	db: TestDB,
 	secret: { secret: string } | { secrets: Array<{ version: number; value: string }> } = {
 		secret: TEST_SECRET,
 	},

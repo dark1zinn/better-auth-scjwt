@@ -18,6 +18,7 @@ import {
 	createCookieHeaders,
 	createMemoryDB,
 	requestSession,
+	rowAt,
 	signUpWithScjwt,
 } from "./helpers/native-auth";
 
@@ -73,7 +74,7 @@ describe("custom SCJWT claims", () => {
 			flags: ["read", true],
 		});
 
-		db.session[0].updatedAt = new Date(0);
+		rowAt(db.session).updatedAt = new Date(0);
 		const refreshed = await requestSession(
 			auth,
 			createCookieHeaders(issued.cookieName, issued.token),

@@ -19,6 +19,8 @@
     "sync:scjwt": "bun run --cwd ../.. build && bun install --cwd ../.. --frozen-lockfile --ignore-scripts --force",
     "pretest": "bun run sync:scjwt",
     "test": "vitest run",
+    "pretypecheck": "bun run sync:scjwt",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",

@@ -15,7 +15,9 @@ import {
 	createCookieHeaders,
 	createMemoryDB,
 	requestSession,
+	rowAt,
 	signUpWithScjwt,
+	type HeaderInput,
 } from "./helpers/native-auth";
 
 const PASSWORD = "correct-horse-battery-staple";
@@ -349,7 +351,7 @@ describe("terminal SCJWT session finalizer", () => {
 		});
 		const email = "header-two-factor@example.com";
 		const issued = await signUpWithScjwt(auth, email);
-		const json = (headers: HeadersInit, cookie?: string) => {
+		const json = (headers: HeaderInput, cookie?: string) => {
 			const result = new Headers(headers);
 			result.set("content-type", "application/json");
 			if (cookie) result.set("cookie", cookie);
@@ -388,7 +390,7 @@ describe("terminal SCJWT session finalizer", () => {
 			(await post("/two-factor/send-otp", json(STABLE_HEADERS, challenge), {})).status,
 		).toBe(200);
 		const verified = await post("/two-factor/verify-otp", json(STABLE_HEADERS, challenge), {
-			code: codes.get(db.user[0]?.id ?? ""),
+			code: codes.get(rowAt(db.user).id ?? ""),
 		});
 		expect(verified.status).toBe(200);
 		const token = verified.headers.get("set-auth-token");

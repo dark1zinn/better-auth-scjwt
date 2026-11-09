@@ -226,10 +226,13 @@ Tested toolchain: Bun 1.4.2 and Node.js 24 (>= 24.11.0). Bun runs the tests, bui
 
 ```bash
 bun install
+bun run typecheck
 bun test
 bun run build
 bun run test:package
 ```
+
+`bun run typecheck` checks `src` with the strict, isolated-declaration settings used for publishing (`tsconfig.json`) and then `src`, `test`, and `scripts` together (`tsconfig.test.json`), so the integration suites that carry the security guarantees are type-checked too. The packed-consumer fixtures in `test/consumer` are excluded there because `test:package` checks them under their own module-resolution settings. `bun run --cwd examples/nestjs typecheck` does the same for the NestJS example.
 
 The root integration suite exercises real Better Auth endpoints with the memory adapter and test-utils plugin. The NestJS example adds isolated HTTP profiles for SCJWT alone, Admin, Admin RBAC, i18n, captcha, username, email OTP, two-factor, and the combined plugins; see [`examples/README.md`](./examples/README.md).
 

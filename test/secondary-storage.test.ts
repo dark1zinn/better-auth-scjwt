@@ -10,6 +10,7 @@ import {
 	createCookieHeaders,
 	createMemoryDB,
 	requestSession,
+	rowAt,
 	signUpWithScjwt,
 } from "./helpers/native-auth";
 
@@ -101,7 +102,7 @@ describe("database-backed session invariant", () => {
 		const headers = createCookieHeaders(issued.cookieName, issued.token);
 		expect((await requestSession(auth, headers)).status).toBe(200);
 
-		const [row] = db.session;
+		const row = rowAt(db.session);
 		expect(values.has(row.token)).toBe(true);
 		values.delete(row.token);
 		expect(db.session).toHaveLength(1);
@@ -220,7 +221,8 @@ describe("authoritative storage failures", () => {
 		});
 		const victim = await signUpWithScjwt(auth, "mismatch-victim@example.com");
 		await signUpWithScjwt(auth, "mismatch-other@example.com");
-		const [victimRow, otherRow] = db.session;
+		const victimRow = rowAt(db.session, 0);
+		const otherRow = rowAt(db.session, 1);
 		const original = values.get(victimRow.token);
 		values.set(victimRow.token, values.get(otherRow.token) ?? "");
 		const headers = createCookieHeaders(victim.cookieName, victim.token);
@@ -251,7 +253,7 @@ describe("authoritative storage failures", () => {
 			// The refresh has authenticated and is about to extend the row.
 			const inflight = requestSession(auth, headers);
 			await atUpdate.promise;
-			await context.internalAdapter.deleteSession(db.session[0]?.token ?? "");
+			await context.internalAdapter.deleteSession(rowAt(db.session).token ?? "");
 			expect(db.session).toHaveLength(0);
 			release.resolve();
 			const raced = await inflight;

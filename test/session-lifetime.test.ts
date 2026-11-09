@@ -1,6 +1,6 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
 import { betterAuth } from "better-auth";
-import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
+import { memoryAdapter } from "better-auth/adapters/memory";
 import { parseSetCookieHeader } from "better-auth/cookies";
 import { decodeJwt } from "jose";
 import { scjwt } from "../src/plugin/index";
@@ -11,6 +11,9 @@ import {
 	createCookieHeaders,
 	createMemoryDB,
 	requestSession,
+	rowAt,
+	type HeaderInput,
+	type TestDB,
 } from "./helpers/native-auth";
 
 const PASSWORD = "correct-horse-battery-staple";
@@ -20,7 +23,7 @@ const PLACEMENTS = ["cookie", "header"] as const;
 type Placement = (typeof PLACEMENTS)[number];
 
 function createAuth(
-	db: MemoryDB,
+	db: TestDB,
 	tokenPlacement: Placement,
 	session?: { expiresIn?: number; updateAge?: number },
 ) {
@@ -43,7 +46,7 @@ async function post(
 	auth: Auth,
 	path: string,
 	body: object,
-	headers: HeadersInit = STABLE_HEADERS,
+	headers: HeaderInput = STABLE_HEADERS,
 ): Promise<Response> {
 	const requestHeaders = new Headers(headers);
 	requestHeaders.set("content-type", "application/json");
@@ -75,8 +78,8 @@ async function tokenHeaders(auth: Auth, placement: Placement, token: string) {
 	return createCookieHeaders((await auth.$context).authCookies.sessionToken.name, token);
 }
 
-function sessionExpiry(db: MemoryDB): number {
-	return new Date(db.session[0].expiresAt).getTime();
+function sessionExpiry(db: TestDB): number {
+	return new Date(rowAt(db.session).expiresAt).getTime();
 }
 
 async function withClock<T>(at: number, run: () => Promise<T>): Promise<T> {

@@ -1,6 +1,6 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
 import { betterAuth } from "better-auth";
-import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
+import { memoryAdapter } from "better-auth/adapters/memory";
 import { parseSetCookieHeader } from "better-auth/cookies";
 import { decodeJwt } from "jose";
 import { scjwt } from "../src/plugin/index";
@@ -10,13 +10,15 @@ import {
 	TEST_SECRET,
 	createMemoryDB,
 	requestSession,
+	rowAt,
+	type TestDB,
 } from "./helpers/native-auth";
 
 const PASSWORD = "correct-horse-battery-staple";
 const STRATEGIES = ["compact", "jwt", "jwe"] as const;
 
 function createAuth(
-	db: MemoryDB,
+	db: TestDB,
 	options: {
 		strategy?: (typeof STRATEGIES)[number];
 		tokenPlacement?: "cookie" | "header";
@@ -92,9 +94,9 @@ describe("cookie cache under SCJWT", () => {
 			const context = await auth.$context;
 			const { cookies } = await signUp(auth, `${strategy}-cache@example.com`);
 			expect(cookies.has(context.authCookies.sessionData.name)).toBe(true);
-			const userId = db.user[0].id;
+			const userId = rowAt(db.user).id;
 			await context.internalAdapter.updateUser(userId, { name: "Renamed" });
-			await context.internalAdapter.updateSession(db.session[0].token, {
+			await context.internalAdapter.updateSession(rowAt(db.session).token, {
 				deviceLabel: "rotated",
 			});
 			const body = await readSession(auth, browserHeaders(cookies));
@@ -114,7 +116,7 @@ describe("cookie cache under SCJWT", () => {
 			name.startsWith(`${context.authCookies.sessionData.name}.`),
 		);
 		expect(chunkNames.length).toBeGreaterThan(1);
-		await context.internalAdapter.updateUser(db.user[0].id, { bio: "short" });
+		await context.internalAdapter.updateUser(rowAt(db.user).id, { bio: "short" });
 		expect((await readSession(auth, browserHeaders(cookies))).user.bio).toBe("short");
 	});
 
@@ -122,7 +124,7 @@ describe("cookie cache under SCJWT", () => {
 		const db = createMemoryDB();
 		const auth = createAuth(db);
 		const { cookies } = await signUp(auth, "revoked-cache@example.com");
-		await (await auth.$context).internalAdapter.deleteSession(db.session[0].token);
+		await (await auth.$context).internalAdapter.deleteSession(rowAt(db.session).token);
 		const response = await requestSession(auth, browserHeaders(cookies));
 		expect(response.status).toBe(401);
 	});
@@ -138,7 +140,7 @@ describe("cookie cache under SCJWT", () => {
 			if (name.startsWith(context.authCookies.sessionData.name)) mixed.set(name, value);
 		}
 		const body = await readSession(auth, browserHeaders(mixed));
-		expect(body.user.id).toBe(db.user[0].id);
+		expect(body.user.id).toBe(rowAt(db.user).id);
 	});
 
 	test("header placement never authenticates from native cache cookies alone", async () => {
@@ -164,9 +166,9 @@ describe("cookie cache under SCJWT", () => {
 			const replacement = parseSetCookieHeader(
 				refreshed.headers.get("set-cookie") ?? "",
 			).get(sessionCookieName)?.value;
-			expect(decodeJwt(replacement ?? "").sid).toBe(db.session[0].id);
+			expect(decodeJwt(replacement ?? "").sid).toBe(rowAt(db.session).id);
 
-			const before = new Date(db.session[1].expiresAt).getTime();
+			const before = new Date(rowAt(db.session, 1).expiresAt).getTime();
 			const unchanged = await requestSession(auth, browserHeaders(nonpersistent.cookies));
 			expect(unchanged.status).toBe(200);
 			expect(
@@ -174,7 +176,7 @@ describe("cookie cache under SCJWT", () => {
 					sessionCookieName,
 				),
 			).toBeUndefined();
-			expect(new Date(db.session[1].expiresAt).getTime()).toBe(before);
+			expect(new Date(rowAt(db.session, 1).expiresAt).getTime()).toBe(before);
 		} finally {
 			setSystemTime();
 		}

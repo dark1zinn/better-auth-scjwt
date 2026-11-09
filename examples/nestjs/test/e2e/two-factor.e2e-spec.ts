@@ -9,17 +9,10 @@ import {
   sessionIdOf,
   type AuthClient,
   type HttpResponse,
-  type ProfileHarness,
 } from './support/nest-auth-harness.js';
 
 type UserRecord = { id: string; email: string };
 type SessionRecord = { id: string };
-
-type TwoFactorPlugins = [
-  ReturnType<typeof twoFactor>,
-  ReturnType<typeof username>,
-  ReturnType<typeof admin>,
-];
 
 /** Raw `Set-Cookie` value of the pending two-factor challenge cookie. */
 function challengeCookie(response: HttpResponse): string {
@@ -34,28 +27,33 @@ function challengeCookie(response: HttpResponse): string {
   return pair;
 }
 
+/** OTP codes delivered per user id; filled by the plugin's `sendOTP`. */
+const codes = new Map<string, string>();
+
+function createTwoFactorHarness() {
+  return createNestAuthHarness({
+    name: 'two-factor',
+    additionalPlugins: [
+      twoFactor({
+        otpOptions: {
+          sendOTP: async ({ user, otp }) => {
+            codes.set(user.id, otp);
+          },
+        },
+      }),
+      username(),
+      admin(),
+    ],
+  });
+}
+
 describe('NestJS two-factor (OTP) profile', () => {
-  let harness: ProfileHarness<TwoFactorPlugins>;
+  let harness: Awaited<ReturnType<typeof createTwoFactorHarness>>;
   let cookieName: string;
   let sequence = 0;
-  /** Latest OTP delivered per user id; filled by the plugin's `sendOTP`. */
-  const codes = new Map<string, string>();
 
   beforeAll(async () => {
-    harness = await createNestAuthHarness({
-      name: 'two-factor',
-      additionalPlugins: [
-        twoFactor({
-          otpOptions: {
-            sendOTP: async ({ user, otp }) => {
-              codes.set(user.id, otp);
-            },
-          },
-        }),
-        username(),
-        admin(),
-      ],
-    });
+    harness = await createTwoFactorHarness();
     cookieName = harness.sessionCookieName;
   });
 
