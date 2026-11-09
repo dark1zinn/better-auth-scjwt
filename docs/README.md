@@ -35,9 +35,11 @@ The injected cookie never replaces the response transport. It exists only in the
 
 ## Issuance and refresh flow
 
-Better Auth's `setSessionCookie` records `ctx.context.newSession`. A generic after hook signs SCJWT whenever that value is present on a successful response. No endpoint names are assumed, so OAuth callbacks, magic links, passkeys, impersonation, and custom plugins receive the same behavior as email/password routes.
+Better Auth's `setSessionCookie` records `ctx.context.newSession`. SCJWT issues from that value in a session finalizer: `scjwt()`'s `init` appends an internal plugin, `scjwt-session-finalizer`, after every registered plugin, and its after hook runs once all other plugin after-hooks have finished. It therefore observes the final result and the final `newSession`: a later hook that rejects the request, withdraws the session (for example a pending two-factor challenge), or substitutes another session determines what is issued. No endpoint names are assumed, so OAuth callbacks, magic links, passkeys, impersonation, and custom plugins receive the same behavior as email/password routes, for both HTTP requests and direct `auth.api` calls.
 
-Better Auth `session.expiresIn` caps token lifetime. Better Auth `session.updateAge` controls refresh. A native refresh sets `newSession`, and the after hook emits a replacement SCJWT only for a successful 2xx result. Failed results expire native session cookies accumulated before the failure.
+The finalizer position relies on Better Auth 1.7.18 appending `init`-returned plugins and running plugin after-hooks in order. Before every endpoint, SCJWT verifies that no plugin with after-hooks follows the finalizer (for example one appended by another plugin's `init`) and fails the request with `[scjwt] session finalizer must run after all plugin after-hooks.` rather than issuing early. Registering `scjwt()` more than once fails initialization.
+
+Better Auth `session.expiresIn` caps token lifetime. Better Auth `session.updateAge` controls refresh. A native refresh sets `newSession`, and the finalizer emits a replacement SCJWT only for a successful result. A failed result, a session that has already expired, or a token that cannot be signed (for example invalid custom claims) expires the native session cookies accumulated by the request and drops any pending `set-auth-token`, so the opaque native token never stands in for an SCJWT. The backing session row is left to Better Auth.
 
 ## Transport behavior
 
@@ -87,6 +89,7 @@ Plain Better Auth `secret` produces an HS256 token without `kid`. Better Auth ve
 
 - `test/native-session.test.ts`: cookie/header transport, native `getSession`, custom secure prefixes, precedence, callback issuance, failure suppression, core sign-out.
 - `test/custom-claims.test.ts`: issuance/refresh resolver calls, JSON limits, strict default payload, dynamic mismatch, secret rotation.
+- `test/lifecycle-finalization.test.ts`: terminal finalizer ordering, late denial and session withdrawal or substitution, HTTP and direct `auth.api` parity, shared plugin instances, finalizer-position and duplicate-registration guards.
 - `test/fingerprint-mode.test.ts`: missing headers, strict mismatch revocation, IP-only behavior, trusted proxies.
 - `test/secondary-storage.test.ts`: database and secondary-storage initialization invariants.
 - `test/admin-revoke-paths.test.ts`: Better Auth admin ban and session-revoke paths.

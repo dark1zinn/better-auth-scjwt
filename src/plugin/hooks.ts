@@ -1,3 +1,4 @@
+import type { GenericEndpointContext } from "@better-auth/core";
 import type { AuthContext, BetterAuthPlugin, Session } from "better-auth";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import {
@@ -19,6 +20,7 @@ import { getRequestFingerprintInput } from "./request-context";
 import {
 	deliverSessionToken,
 	isHeaderOnlyNativeCookie,
+	SET_AUTH_TOKEN_HEADER,
 } from "./token-deliver";
 import { extractToken } from "./token-extract";
 import type {
@@ -30,8 +32,10 @@ import type {
 /**
  * Builds SCJWT's universal hooks. The before hook authenticates a presented
  * SCJWT through Better Auth's session lifecycle and injects the native
- * session cookie; the after hook issues a replacement SCJWT whenever a
- * successful response carries `ctx.context.newSession`.
+ * session cookie. The after hook is the session finalizer: `scjwt()` installs
+ * it on an internal plugin appended after every registered plugin, so it
+ * observes the final `ctx.context.newSession` and result and issues a
+ * replacement SCJWT only when the request ultimately succeeds.
  */
 export function createScjwtHooks(
 	options: ResolvedScjwtOptions,
@@ -142,9 +146,7 @@ export function createScjwtHooks(
 						(isAPIError(returned) && returned.statusCode >= 400) ||
 						(returned instanceof Response && !returned.ok)
 					) {
-						expireCookie(ctx, ctx.context.authCookies.sessionToken);
-						expireCookie(ctx, ctx.context.authCookies.sessionData);
-						expireCookie(ctx, ctx.context.authCookies.dontRememberToken);
+						clearSessionTransport(ctx);
 						return;
 					}
 					const headers =
@@ -160,29 +162,38 @@ export function createScjwtHooks(
 						issuedAt + ctx.context.sessionConfig.expiresIn,
 					);
 					if (expiresAt <= issuedAt) {
+						clearSessionTransport(ctx);
 						return;
 					}
-					const customClaims = options.getCustomClaims
-						? await resolveCustomClaims(options, {
-								session: newSession.session,
-								user: newSession.user,
-								request: ctx.request,
-							})
-						: undefined;
-					const token = await signJwtFromParts({
-						secretConfig: ctx.context.secretConfig,
-						issuer: ctx.context.baseURL,
-						userId: newSession.session.userId,
-						fingerprint: await computeFingerprint(
-							input.ip,
-							input.ua,
-							input.platform,
-						),
-						sessionId: newSession.session.id,
-						expiresAt,
-						issuedAt,
-						customClaims,
-					});
+					let token: string;
+					try {
+						const customClaims = options.getCustomClaims
+							? await resolveCustomClaims(options, {
+									session: newSession.session,
+									user: newSession.user,
+									request: ctx.request,
+								})
+							: undefined;
+						token = await signJwtFromParts({
+							secretConfig: ctx.context.secretConfig,
+							issuer: ctx.context.baseURL,
+							userId: newSession.session.userId,
+							fingerprint: await computeFingerprint(
+								input.ip,
+								input.ua,
+								input.platform,
+							),
+							sessionId: newSession.session.id,
+							expiresAt,
+							issuedAt,
+							customClaims,
+						});
+					} catch (error) {
+						// Never let the opaque native session cookie stand in for an
+						// SCJWT that could not be issued.
+						clearSessionTransport(ctx);
+						throw error;
+					}
 					ctx.context.responseHeaders ??= new Headers();
 					deliverSessionToken(
 						ctx.context.responseHeaders,
@@ -194,6 +205,21 @@ export function createScjwtHooks(
 			},
 		],
 	};
+}
+
+/**
+ * Removes every pending authentication transport for a session that will not
+ * receive an SCJWT: live native session cookies are replaced by clearing
+ * cookies and any pending `set-auth-token` header is dropped. The backing
+ * session row is left to Better Auth.
+ */
+function clearSessionTransport(
+	ctx: GenericEndpointContext & { context: { responseHeaders?: Headers } },
+): void {
+	expireCookie(ctx, ctx.context.authCookies.sessionToken);
+	expireCookie(ctx, ctx.context.authCookies.sessionData);
+	expireCookie(ctx, ctx.context.authCookies.dontRememberToken);
+	ctx.context.responseHeaders?.delete(SET_AUTH_TOKEN_HEADER);
 }
 
 function stripNativeSessionCookies(

@@ -50,7 +50,9 @@ Register `scjwt()` before any plugin whose hooks read the current session:
 plugins: [scjwt(), admin(), username(), emailOTP({ ... }), i18n({ ... })],
 ```
 
-Better Auth runs plugin before-hooks in registration order. SCJWT's before-hook is what turns the presented JWT into `ctx.context.session` and the request-only native cookie, so a later hook (for example username's `/update-user` ownership and `immutableUsername` checks) sees the authenticated session. Request interceptors such as captcha (`onRequest`) run before all hooks and are unaffected by order. Keep translation plugins such as i18n last so their after-hook translates the final error.
+Better Auth runs user hooks first, then plugin before-hooks in registration order. SCJWT's before-hook is what turns the presented JWT into `ctx.context.session` and the request-only native cookie, so a later hook (for example username's `/update-user` ownership and `immutableUsername` checks) sees the authenticated session. Request interceptors such as captcha (`onRequest`) run before all hooks and are unaffected by order. Keep translation plugins such as i18n last among your plugins so their after-hook translates the final error.
+
+Issuance does not depend on where `scjwt()` is registered. Its `init` appends an internal `scjwt-session-finalizer` plugin after all registered plugins, so the SCJWT is signed only after every plugin after-hook has run. A later hook that denies the request, withdraws the new session (for example a pending two-factor challenge), or replaces it decides the outcome. Requests fail with `[scjwt] session finalizer must run after all plugin after-hooks.` if another plugin's `init` appends after-hooks behind the finalizer, and `scjwt()` must be registered exactly once. Response interceptors (`onResponse`) that rewrite authentication headers after the hook pipeline are outside this guarantee.
 
 ## Client setup
 
