@@ -35,6 +35,20 @@ type UserRecord = {
 };
 type SessionRecord = { id: string; token: string; userId: string };
 
+/** A freshly signed-up account owned by a single test case. */
+interface UserFixture {
+  client: AuthClient;
+  token: string;
+  user: UserRecord;
+  email: string;
+}
+
+/** A freshly promoted administrator owned by a single test case. */
+interface AdminFixture {
+  client: AuthClient;
+  id: string;
+}
+
 const CAPTCHA_ENDPOINTS = [
   '/sign-up/email',
   '/sign-in/email',
@@ -48,7 +62,6 @@ const CAPTCHA_ENDPOINTS = [
   '/email-otp/change-email',
   '/admin/**',
 ];
-const OLD_PASSWORD = PASSWORD;
 const NEW_PASSWORD = 'combined-reset-password-123';
 
 type CombinedPlugins = [
@@ -59,18 +72,16 @@ type CombinedPlugins = [
   ReturnType<typeof i18n>,
 ];
 
+/**
+ * Every case creates the accounts, roles, verification state and clients it
+ * uses, so each `it` passes alone (`-t`) and in any order. Only the Nest
+ * application, captcha verifier and OTP outbox are shared.
+ */
 describe('NestJS combined-plugins profile', () => {
   let verifier: CaptchaVerifier;
   let harness: ProfileHarness<CombinedPlugins>;
   let cookieName: string;
-  let adminClient: AuthClient;
-  let userClient: AuthClient;
-  let otpClient: AuthClient;
-  let adminId: string;
-  let userId: string;
-  let userEmail: string;
-  let userToken: string;
-  let otpToken: string;
+  let sequence = 0;
   const capture = createOtpCapture();
 
   beforeAll(async () => {
@@ -97,25 +108,6 @@ describe('NestJS combined-plugins profile', () => {
       dispose: [verifier.stop],
     });
     cookieName = harness.sessionCookieName;
-    adminClient = harness.createClient();
-    userClient = harness.createClient();
-    otpClient = harness.createClient();
-
-    const adminSignup = await adminClient.post(
-      '/api/auth/sign-up/email',
-      {
-        name: 'Combined Admin',
-        email: 'combined-admin@example.com',
-        password: PASSWORD,
-      },
-      captchaHeaders(CAPTCHA_PASS),
-    );
-    expect(adminSignup.status).toBe(200);
-    adminId = (adminSignup.body.user as UserRecord).id;
-    await harness.context.internalAdapter.updateUser(adminId, {
-      role: 'admin',
-    });
-    expect((await adminClient.get('/me')).status).toBe(200);
   });
 
   afterAll(async () => {
@@ -132,13 +124,74 @@ describe('NestJS combined-plugins profile', () => {
     return client.post(path, body, captchaHeaders(response));
   }
 
+  function uniqueEmail(label: string): string {
+    sequence += 1;
+    return `combined-${label}-${sequence}@example.com`;
+  }
+
+  async function signUpUser(
+    label: string,
+    extra: Record<string, string> = {},
+  ): Promise<UserFixture> {
+    const client = harness.createClient();
+    const email = uniqueEmail(label);
+    const signup = await post(client, '/api/auth/sign-up/email', {
+      name: `Combined ${label}`,
+      email,
+      password: PASSWORD,
+      ...extra,
+    });
+    expect(signup.status).toBe(200);
+    return {
+      client,
+      token: expectScjwt(signup, cookieName),
+      user: signup.body.user as UserRecord,
+      email,
+    };
+  }
+
+  async function createAdmin(label: string): Promise<AdminFixture> {
+    const fixture = await signUpUser(`${label}-admin`);
+    await harness.context.internalAdapter.updateUser(fixture.user.id, {
+      role: 'admin',
+    });
+    expect((await fixture.client.get('/me')).status).toBe(200);
+    return { client: fixture.client, id: fixture.user.id };
+  }
+
+  async function signIn(email: string, password = PASSWORD) {
+    const client = harness.createClient();
+    const response = await post(client, '/api/auth/sign-in/email', {
+      email,
+      password,
+    });
+    expect(response.status).toBe(200);
+    return { client, token: expectScjwt(response, cookieName) };
+  }
+
+  /** Proves email ownership through the real email-OTP verification flow. */
+  async function verifyEmail(client: AuthClient, email: string) {
+    const sent = await post(
+      client,
+      '/api/auth/email-otp/send-verification-otp',
+      { email, type: 'email-verification' },
+    );
+    expect(sent.status).toBe(200);
+    const verified = await post(client, '/api/auth/email-otp/verify-email', {
+      email,
+      otp: capture.latest(email, 'email-verification'),
+    });
+    expect(verified.status).toBe(200);
+    expectNoScjwt(verified, cookieName);
+  }
+
   it('signs up with captcha, username, locale, and default Admin role', async () => {
-    userEmail = `combined-user-${Date.now()}@example.com`;
+    const absentEmail = uniqueEmail('no-captcha');
     const absent = await harness
       .createClient()
       .post('/api/auth/sign-up/email', {
         name: 'No Captcha',
-        email: 'combined-no-captcha@example.com',
+        email: absentEmail,
         password: PASSWORD,
         username: 'no_captcha',
         locale: 'fr',
@@ -147,155 +200,114 @@ describe('NestJS combined-plugins profile', () => {
     expect(absent.body.code).toBe('MISSING_RESPONSE');
     expectNoScjwt(absent, cookieName);
     expect(
-      await harness.context.internalAdapter.findUserByEmail(
-        'combined-no-captcha@example.com',
-      ),
+      await harness.context.internalAdapter.findUserByEmail(absentEmail),
     ).toBeNull();
 
-    const signup = await post(userClient, '/api/auth/sign-up/email', {
-      name: 'Combined User',
-      email: userEmail,
-      password: PASSWORD,
-      username: 'Combined_User',
+    const { client, user, email } = await signUpUser('signup', {
+      username: 'Signup_User',
       locale: 'fr',
     });
-    expect(signup.status).toBe(200);
-    userToken = expectScjwt(signup, cookieName);
-    userId = (signup.body.user as UserRecord).id;
-    expect(signup.body.user).toMatchObject({
+    expect(user).toMatchObject({
       role: 'user',
-      username: 'combined_user',
+      username: 'signup_user',
       locale: 'fr',
     });
-    const session = await userClient.get('/api/auth/get-session');
+    const session = await client.get('/api/auth/get-session');
     expect(session.status).toBe(200);
     expect(session.body.user).toMatchObject({
       role: 'user',
-      username: 'combined_user',
+      username: 'signup_user',
       locale: 'fr',
     });
-    expect((await userClient.get('/me')).body).toEqual({
-      id: userId,
-      email: userEmail,
-    });
+    expect((await client.get('/me')).body).toEqual({ id: user.id, email });
   });
 
   it('authenticates username and email OTP sessions, while captcha gates OTP delivery', async () => {
+    const owner = await signUpUser('otp', {
+      username: 'Otp_User',
+      locale: 'fr',
+    });
     const usernameClient = harness.createClient();
     const usernameSignin = await post(
       usernameClient,
       '/api/auth/sign-in/username',
-      {
-        username: 'COMBINED_USER',
-        password: PASSWORD,
-      },
+      { username: 'OTP_USER', password: PASSWORD },
     );
     expect(usernameSignin.status).toBe(200);
     const usernameToken = expectScjwt(usernameSignin, cookieName);
-    expect(sessionIdOf(usernameToken)).not.toBe(sessionIdOf(userToken));
+    expect(sessionIdOf(usernameToken)).not.toBe(sessionIdOf(owner.token));
     expect(
       (await usernameClient.get('/api/auth/get-session')).body.user.username,
-    ).toBe('combined_user');
+    ).toBe('otp_user');
     expect((await usernameClient.get('/me')).status).toBe(200);
 
-    const before = capture.count(userEmail, 'sign-in');
+    const otpClient = harness.createClient();
+    const before = capture.count(owner.email, 'sign-in');
     const rejected = await post(
       otpClient,
       '/api/auth/email-otp/send-verification-otp',
-      {
-        email: userEmail,
-        type: 'sign-in',
-      },
+      { email: owner.email, type: 'sign-in' },
       CAPTCHA_REJECT,
     );
     expect(rejected.status).toBe(403);
     expect(rejected.body.code).toBe('VERIFICATION_FAILED');
     expectNoScjwt(rejected, cookieName);
-    expect(capture.count(userEmail, 'sign-in')).toBe(before);
+    expect(capture.count(owner.email, 'sign-in')).toBe(before);
 
-    const verificationSent = await post(
-      otpClient,
-      '/api/auth/email-otp/send-verification-otp',
-      {
-        email: userEmail,
-        type: 'email-verification',
-      },
-    );
-    expect(verificationSent.status).toBe(200);
-    const verified = await post(otpClient, '/api/auth/email-otp/verify-email', {
-      email: userEmail,
-      otp: capture.latest(userEmail, 'email-verification'),
-    });
-    expect(verified.status).toBe(200);
-    expectNoScjwt(verified, cookieName);
-
+    await verifyEmail(otpClient, owner.email);
     const sent = await post(
       otpClient,
       '/api/auth/email-otp/send-verification-otp',
-      {
-        email: userEmail,
-        type: 'sign-in',
-      },
+      { email: owner.email, type: 'sign-in' },
     );
-    const unprovenEmail = `combined-unproven-${Date.now()}@example.com`;
-    const unprovenClient = harness.createClient();
-    const unprovenSignup = await post(
-      unprovenClient,
-      '/api/auth/sign-up/email',
-      {
-        name: 'Unproven User',
-        email: unprovenEmail,
-        password: PASSWORD,
-      },
-    );
-    const unprovenToken = expectScjwt(unprovenSignup, cookieName);
-    const unprovenUser = unprovenSignup.body.user as UserRecord;
-    await harness.context.internalAdapter.updateUser(unprovenUser.id, {
+    expect(sent.status).toBe(200);
+
+    const unproven = await signUpUser('unproven');
+    await harness.context.internalAdapter.updateUser(unproven.user.id, {
       emailVerified: false,
     });
     const unprovenSend = await post(
       harness.createClient(),
       '/api/auth/email-otp/send-verification-otp',
-      {
-        email: unprovenEmail,
-        type: 'sign-in',
-      },
+      { email: unproven.email, type: 'sign-in' },
     );
     expect(unprovenSend.status).toBe(200);
     const unprovenSignin = await post(
       harness.createClient(),
       '/api/auth/sign-in/email-otp',
       {
-        email: unprovenEmail,
-        otp: capture.latest(unprovenEmail, 'sign-in'),
+        email: unproven.email,
+        otp: capture.latest(unproven.email, 'sign-in'),
       },
     );
     expect(unprovenSignin.status).toBe(200);
     expectScjwt(unprovenSignin, cookieName);
-    expect((await harness.getWithToken('/me', unprovenToken)).status).toBe(401);
-    expect(sent.status).toBe(200);
+    expect((await harness.getWithToken('/me', unproven.token)).status).toBe(
+      401,
+    );
+
     const otpSignin = await post(otpClient, '/api/auth/sign-in/email-otp', {
-      email: userEmail,
-      otp: capture.latest(userEmail, 'sign-in'),
+      email: owner.email,
+      otp: capture.latest(owner.email, 'sign-in'),
     });
     expect(otpSignin.status).toBe(200);
-    otpToken = expectScjwt(otpSignin, cookieName);
+    const otpToken = expectScjwt(otpSignin, cookieName);
     expect(sessionIdOf(otpToken)).not.toBe(sessionIdOf(usernameToken));
     expect(
       (await otpClient.get('/api/auth/get-session')).body.user,
-    ).toMatchObject({ username: 'combined_user', locale: 'fr' });
+    ).toMatchObject({ username: 'otp_user', locale: 'fr' });
     expect((await otpClient.get('/me')).status).toBe(200);
   });
 
   it('localizes valid-captcha credential errors and rejects captcha before authentication', async () => {
-    const wrong = await harness.createClient().post(
-      '/api/auth/sign-in/email',
-      {
-        email: userEmail,
-        password: 'wrong-password',
-      },
-      { ...captchaHeaders(CAPTCHA_PASS), 'Accept-Language': 'fr' },
-    );
+    const { email } = await signUpUser('localized');
+    const wrong = await harness
+      .createClient()
+      .post(
+        '/api/auth/sign-in/email',
+        { email, password: 'wrong-password' },
+        { ...captchaHeaders(CAPTCHA_PASS), 'Accept-Language': 'fr' },
+      );
     expect(wrong.status).toBe(401);
     expect(wrong.body.code).toBe('INVALID_EMAIL_OR_PASSWORD');
     expect(wrong.body.message).toBe(
@@ -303,67 +315,70 @@ describe('NestJS combined-plugins profile', () => {
     );
     expectNoScjwt(wrong, cookieName);
 
-    const rejected = await harness.createClient().post(
-      '/api/auth/sign-in/email',
-      {
-        email: userEmail,
-        password: 'wrong-password',
-      },
-      { ...captchaHeaders(CAPTCHA_REJECT), 'Accept-Language': 'fr' },
-    );
+    const rejected = await harness
+      .createClient()
+      .post(
+        '/api/auth/sign-in/email',
+        { email, password: 'wrong-password' },
+        { ...captchaHeaders(CAPTCHA_REJECT), 'Accept-Language': 'fr' },
+      );
     expect(rejected.status).toBe(403);
     expect(rejected.body.code).toBe('VERIFICATION_FAILED');
     expectNoScjwt(rejected, cookieName);
   });
 
   it('updates RBAC through HTTP and enforces captcha and authorization', async () => {
-    const missing = await adminClient.post('/api/auth/admin/set-role', {
-      userId,
-      role: 'auditor',
-    });
+    const administrator = await createAdmin('rbac');
+    const member = await signUpUser('rbac');
+    const missing = await administrator.client.post(
+      '/api/auth/admin/set-role',
+      { userId: member.user.id, role: 'auditor' },
+    );
     expect(missing.status).toBe(400);
     expect(missing.body.code).toBe('MISSING_RESPONSE');
-    const changed = await post(adminClient, '/api/auth/admin/set-role', {
-      userId,
+    const changed = await post(administrator.client, '/api/auth/admin/set-role', {
+      userId: member.user.id,
       role: 'auditor',
     });
     expect(changed.status).toBe(200);
     expectNoScjwt(changed, cookieName);
-    const userSession = await userClient.get('/api/auth/get-session');
-    expect(userSession.status).toBe(200);
-    expect(userSession.body.user.role).toBe('auditor');
-    const read = await post(userClient, '/api/auth/admin/has-permission', {
+    const memberSession = await member.client.get('/api/auth/get-session');
+    expect(memberSession.status).toBe(200);
+    expect(memberSession.body.user.role).toBe('auditor');
+    const read = await post(member.client, '/api/auth/admin/has-permission', {
       permissions: { project: ['read'] },
     });
     expect(read.status).toBe(200);
     expect(read.body).toEqual({ error: null, success: true });
-    const create = await post(userClient, '/api/auth/admin/has-permission', {
+    const create = await post(member.client, '/api/auth/admin/has-permission', {
       permissions: { project: ['create'] },
     });
     expect(create.body).toEqual({ error: null, success: false });
-    const denied = await post(userClient, '/api/auth/admin/ban-user', {
-      userId: adminId,
+    const denied = await post(member.client, '/api/auth/admin/ban-user', {
+      userId: administrator.id,
     });
     expect(denied.status).toBe(403);
     expectNoScjwt(denied, cookieName);
   });
 
   it('impersonates and restores the original administrator session', async () => {
-    const original = adminClient.token();
+    const administrator = await createAdmin('impersonation');
+    const target = await signUpUser('impersonated');
+    const original = administrator.client.token();
     expect(original).toBeDefined();
     const impersonated = await post(
-      adminClient,
+      administrator.client,
       '/api/auth/admin/impersonate-user',
-      { userId },
+      { userId: target.user.id },
     );
     expect(impersonated.status).toBe(200);
     const impersonationToken = expectScjwt(impersonated, cookieName);
     expect(
-      (await adminClient.get('/api/auth/get-session')).body.session
+      (await administrator.client.get('/api/auth/get-session')).body.session
         .impersonatedBy,
-    ).toBe(adminId);
+    ).toBe(administrator.id);
     const stopped = await post(
-      adminClient,
+      administrator.client,
       '/api/auth/admin/stop-impersonating',
       {},
     );
@@ -376,64 +391,61 @@ describe('NestJS combined-plugins profile', () => {
   });
 
   it('revokes one session, then bans all remaining sessions without revival', async () => {
+    const administrator = await createAdmin('ban');
+    const target = await signUpUser('banned');
+    const second = await signIn(target.email);
     const listed = await post(
-      adminClient,
+      administrator.client,
       '/api/auth/admin/list-user-sessions',
-      { userId },
+      { userId: target.user.id },
     );
     expect(listed.status).toBe(200);
     const sessions = listed.body.sessions as SessionRecord[];
     const selected = sessions.find(
-      (session) => session.id === sessionIdOf(userToken),
+      (session) => session.id === sessionIdOf(target.token),
     );
     expect(selected).toBeDefined();
     const revoked = await post(
-      adminClient,
+      administrator.client,
       '/api/auth/admin/revoke-user-session',
       { sessionToken: selected?.token },
     );
     expect(revoked.status).toBe(200);
-    expect((await harness.getWithToken('/me', userToken)).status).toBe(401);
-    expect((await harness.getWithToken('/me', otpToken)).status).toBe(200);
-    const banned = await post(adminClient, '/api/auth/admin/ban-user', {
-      userId,
+    expect((await harness.getWithToken('/me', target.token)).status).toBe(401);
+    expect((await harness.getWithToken('/me', second.token)).status).toBe(200);
+    const banned = await post(administrator.client, '/api/auth/admin/ban-user', {
+      userId: target.user.id,
       banReason: 'combined test',
     });
     expect(banned.status).toBe(200);
-    expect((await harness.getWithToken('/me', otpToken)).status).toBe(401);
-    const unbanned = await post(adminClient, '/api/auth/admin/unban-user', {
-      userId,
-    });
+    expect((await harness.getWithToken('/me', second.token)).status).toBe(401);
+    const unbanned = await post(
+      administrator.client,
+      '/api/auth/admin/unban-user',
+      { userId: target.user.id },
+    );
     expect(unbanned.status).toBe(200);
-    expect((await harness.getWithToken('/me', otpToken)).status).toBe(401);
+    expect((await harness.getWithToken('/me', second.token)).status).toBe(401);
   });
 
   it('resets the password, revokes pre-reset sessions, and signs in with the replacement password', async () => {
-    const liveTokens: string[] = [];
-    for (let device = 0; device < 2; device += 1) {
-      const signin = await post(
-        harness.createClient(),
-        '/api/auth/sign-in/email',
-        { email: userEmail, password: OLD_PASSWORD },
-      );
-      expect(signin.status).toBe(200);
-      liveTokens.push(expectScjwt(signin, cookieName));
-    }
+    const owner = await signUpUser('reset');
+    const liveTokens = [owner.token, (await signIn(owner.email)).token];
     for (const token of liveTokens) {
       expect((await harness.getWithToken('/me', token)).status).toBe(200);
     }
     const request = await post(
       harness.createClient(),
       '/api/auth/email-otp/request-password-reset',
-      { email: userEmail },
+      { email: owner.email },
     );
     expect(request.status).toBe(200);
     const reset = await post(
       harness.createClient(),
       '/api/auth/email-otp/reset-password',
       {
-        email: userEmail,
-        otp: capture.latest(userEmail, 'forget-password'),
+        email: owner.email,
+        otp: capture.latest(owner.email, 'forget-password'),
         password: NEW_PASSWORD,
       },
     );
@@ -444,64 +456,49 @@ describe('NestJS combined-plugins profile', () => {
       expect((await harness.getWithToken('/me', token)).status).toBe(401);
     }
     const old = await post(harness.createClient(), '/api/auth/sign-in/email', {
-      email: userEmail,
-      password: OLD_PASSWORD,
+      email: owner.email,
+      password: PASSWORD,
     });
     expect(old.status).toBe(401);
     expectNoScjwt(old, cookieName);
-    const replacement = await post(
-      harness.createClient(),
-      '/api/auth/sign-in/email',
-      { email: userEmail, password: NEW_PASSWORD },
-    );
-    expect(replacement.status).toBe(200);
-    expectScjwt(replacement, cookieName);
+    await signIn(owner.email, NEW_PASSWORD);
   });
 
   it('changes email through current and new OTPs while preserving the current sid and another session', async () => {
-    const current = harness.createClient();
-    const currentSignIn = await post(current, '/api/auth/sign-in/email', {
-      email: userEmail,
-      password: NEW_PASSWORD,
-    });
-    const currentToken = expectScjwt(currentSignIn, cookieName);
-    const other = harness.createClient();
-    const otherSignIn = await post(other, '/api/auth/sign-in/email', {
-      email: userEmail,
-      password: NEW_PASSWORD,
-    });
-    const otherToken = expectScjwt(otherSignIn, cookieName);
-    const newEmail = `combined-new-${Date.now()}@example.com`;
-    await harness.context.internalAdapter.updateUser(userId, {
+    const owner = await signUpUser('email-change');
+    const current = await signIn(owner.email);
+    const other = await signIn(owner.email);
+    const newEmail = uniqueEmail('email-changed');
+    await harness.context.internalAdapter.updateUser(owner.user.id, {
       emailVerified: false,
     });
-    await post(current, '/api/auth/email-otp/send-verification-otp', {
-      email: userEmail,
+    await post(current.client, '/api/auth/email-otp/send-verification-otp', {
+      email: owner.email,
       type: 'email-verification',
     });
     const requested = await post(
-      current,
+      current.client,
       '/api/auth/email-otp/request-email-change',
       {
         newEmail,
-        otp: capture.latest(userEmail, 'email-verification'),
+        otp: capture.latest(owner.email, 'email-verification'),
       },
     );
     expect(requested.status).toBe(200);
-    const changed = await post(current, '/api/auth/email-otp/change-email', {
-      newEmail,
-      otp: capture.latest(newEmail, 'change-email'),
-    });
+    const changed = await post(
+      current.client,
+      '/api/auth/email-otp/change-email',
+      { newEmail, otp: capture.latest(newEmail, 'change-email') },
+    );
     expect(changed.status).toBe(200);
     const replacement = expectScjwt(changed, cookieName);
-    expect(sessionIdOf(replacement)).toBe(sessionIdOf(currentToken));
+    expect(sessionIdOf(replacement)).toBe(sessionIdOf(current.token));
     expect(
-      (await current.get('/api/auth/get-session')).body.user,
+      (await current.client.get('/api/auth/get-session')).body.user,
     ).toMatchObject({ email: newEmail, emailVerified: true });
-    expect((await harness.getWithToken('/me', otherToken)).status).toBe(200);
-    expect((await other.get('/api/auth/get-session')).body.user).toMatchObject({
-      email: newEmail,
-      emailVerified: true,
-    });
+    expect((await harness.getWithToken('/me', other.token)).status).toBe(200);
+    expect(
+      (await other.client.get('/api/auth/get-session')).body.user,
+    ).toMatchObject({ email: newEmail, emailVerified: true });
   });
 });

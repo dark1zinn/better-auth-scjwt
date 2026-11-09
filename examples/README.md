@@ -36,6 +36,8 @@ Each profile file builds its own Better Auth instance through the factory, a uni
 | `email-otp` | `emailOTP()` | OTP sign-in/auto-registration, attempts, replay, expiry, resend strategies, verification, password reset revocation, two-stage email change |
 | `combined-plugins` | `admin`, `captcha`, `username`, `emailOTP`, `i18n` | All of the above composed in one application |
 
+Within a profile file, cases share only the Nest application and local fixtures. In `combined-plugins` every case signs up its own users and administrators with unique addresses, proves email ownership through the real OTP flow where it needs it, and uses its own clients, so a case passes on its own (`-t "<title>"`), in any order (`--sequence.shuffle`), and does not depend on accounts, tokens, or passwords left behind by another case.
+
 Test-only integrations live in `test/e2e/support/plugin-fixtures.ts`: an ephemeral local Bun server stands in for the Cloudflare Turnstile siteverify endpoint (via `siteVerifyURLOverride`), and OTP codes are generated deterministically and captured in memory. They are fixtures, not production email or captcha implementations; no external service or credential is used.
 
 ### Install and test
