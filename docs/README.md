@@ -39,7 +39,7 @@ Better Auth's `setSessionCookie` records `ctx.context.newSession`. SCJWT issues 
 
 The finalizer position relies on Better Auth 1.7.18 appending `init`-returned plugins and running plugin after-hooks in order. Before every endpoint, SCJWT verifies that no plugin with after-hooks follows the finalizer (for example one appended by another plugin's `init`) and fails the request with `[scjwt] session finalizer must run after all plugin after-hooks.` rather than issuing early. Registering `scjwt()` more than once fails initialization.
 
-Better Auth `session.expiresIn` caps token lifetime. Better Auth `session.updateAge` controls refresh. A native refresh sets `newSession`, and the finalizer emits a replacement SCJWT only for a successful result. A failed result, a session that has already expired, or a token that cannot be signed (for example invalid custom claims) expires the native session cookies accumulated by the request and drops any pending `set-auth-token`, so the opaque native token never stands in for an SCJWT. The backing session row is left to Better Auth.
+Better Auth `session.expiresIn` caps token lifetime. Better Auth `session.updateAge` controls refresh. A native refresh sets `newSession`, and the finalizer emits a replacement SCJWT only for a successful result: any status below 400, including `ctx.redirect` and returned 3xx `Response` redirects. A failed result (status 400 or higher), a session that has already expired, or a token that cannot be signed (for example invalid custom claims) expires the native session cookies accumulated by the request and drops any pending `set-auth-token`, so the opaque native token never stands in for an SCJWT. The backing session row is left to Better Auth.
 
 ## Transport behavior
 

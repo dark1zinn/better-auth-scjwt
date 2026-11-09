@@ -144,7 +144,7 @@ export function createScjwtHooks(
 					const returned = ctx.context.returned;
 					if (
 						(isAPIError(returned) && returned.statusCode >= 400) ||
-						(returned instanceof Response && !returned.ok)
+						(returned instanceof Response && returned.status >= 400)
 					) {
 						clearSessionTransport(ctx);
 						return;

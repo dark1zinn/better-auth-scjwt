@@ -18,6 +18,8 @@ import {
 	signUpWithScjwt,
 } from "./helpers/native-auth";
 
+const RAW_REDIRECT_STATUSES = [302, 303, 307] as const;
+
 function createCallbackFixture(getUserId: () => string): BetterAuthPlugin {
 	async function establishSession<Path extends string>(
 		ctx: EndpointContext<
@@ -78,6 +80,30 @@ function createCallbackFixture(getUserId: () => string): BetterAuthPlugin {
 					await establishSession(ctx);
 					return new Response("callback failed", { status: 422 });
 				},
+			),
+			callbackServerFailureFixture: createAuthEndpoint(
+				"/callback-fixture-server-failure",
+				{ method: "POST" },
+				async (ctx) => {
+					await establishSession(ctx);
+					return new Response("callback crashed", { status: 500 });
+				},
+			),
+			...Object.fromEntries(
+				RAW_REDIRECT_STATUSES.map((status) => [
+					`callbackRawRedirect${status}Fixture`,
+					createAuthEndpoint(
+						`/callback-fixture-raw-redirect-${status}`,
+						{ method: "POST" },
+						async (ctx) => {
+							await establishSession(ctx);
+							return new Response(null, {
+								status,
+								headers: { location: "/signed-in" },
+							});
+						},
+					),
+				]),
 			),
 		},
 	};
@@ -300,6 +326,51 @@ describe("native Better Auth session transport", () => {
 		}
 	});
 
+	test("issues usable SCJWTs on raw redirect responses and keeps the redirect", async () => {
+		for (const tokenPlacement of ["cookie", "header"] as const) {
+			for (const status of RAW_REDIRECT_STATUSES) {
+				let fixtureUserId = "";
+				const auth = betterAuth({
+					database: memoryAdapter(createMemoryDB()),
+					baseURL: TEST_BASE_URL,
+					secret: TEST_SECRET,
+					plugins: [
+						testUtils(),
+						createCallbackFixture(() => fixtureUserId),
+						scjwt({ tokenPlacement }),
+					],
+				});
+				const context = await auth.$context;
+				const user = await context.test.saveUser(context.test.createUser());
+				fixtureUserId = user.id;
+				const response = await auth.handler(
+					new Request(
+						`${TEST_BASE_URL}/api/auth/callback-fixture-raw-redirect-${status}`,
+						{ method: "POST", headers: STABLE_HEADERS },
+					),
+				);
+				expect(response.status).toBe(status);
+				expect(response.headers.get("location")).toBe("/signed-in");
+				const sessionCookie = parseSetCookieHeader(
+					response.headers.get("set-cookie") ?? "",
+				).get(context.authCookies.sessionToken.name);
+				const token = tokenPlacement === "cookie"
+					? sessionCookie?.value
+					: response.headers.get("set-auth-token");
+				expect(token?.split(".")).toHaveLength(3);
+				if (tokenPlacement === "header") {
+					expect(sessionCookie).toBeUndefined();
+				}
+				const headers = tokenPlacement === "cookie"
+					? createCookieHeaders(context.authCookies.sessionToken.name, token ?? "")
+					: new Headers({ ...STABLE_HEADERS, authorization: `Bearer ${token}` });
+				const sessionResponse = await requestSession(auth, headers);
+				expect(sessionResponse.status).toBe(200);
+				expect(await sessionResponse.json()).toMatchObject({ user: { id: user.id } });
+			}
+		}
+	});
+
 	test("preserves an existing session on unrelated failed requests", async () => {
 		const db = createMemoryDB();
 		const auth = betterAuth({
@@ -352,6 +423,7 @@ describe("native Better Auth session transport", () => {
 			for (const [path, status] of [
 				["callback-fixture-failure", 400],
 				["callback-fixture-response-failure", 422],
+				["callback-fixture-server-failure", 500],
 			] as const) {
 				const response = await auth.handler(
 					new Request(`${TEST_BASE_URL}/api/auth/${path}`, {
