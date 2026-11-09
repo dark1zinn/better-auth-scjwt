@@ -196,6 +196,7 @@ Do not trust forwarding headers from origins directly reachable by clients. `ip-
 - Signature, issuer, expiry, payload shape, session subject, lifecycle-aware session liveness (`internalAdapter.findSession`), database expiry, fingerprint, and configured custom claims are checked before native session injection.
 - Missing SCJWT falls through to ordinary Better Auth handling. A present invalid SCJWT returns Better Auth's standard `401 UNAUTHORIZED` response.
 - Session deletion is immediate revocation; there is no SCJWT blocklist.
+- Storage outages fail closed: if the session row or `secondaryStorage` cannot be read, the request fails with a server error (`500`), not `401`, and no credential is issued. SCJWT never falls back from one store to the other.
 - Fingerprint mismatch returns `401` without deleting the session, preventing a mismatched bearer from terminating the shared session.
 - Custom-claim mismatch returns `401` without deleting the session.
 - CSRF: cookie placement is an ambient credential, and Better Auth's origin check rejects state-changing requests from untrusted or missing `Origin` exactly as for native session cookies. Header placement is not ambient (a script must attach `Authorization`), so Better Auth does not origin-check Bearer requests; restrict callers with CORS. Better Auth disables its origin check when `NODE_ENV` is `test` unless `advanced.disableOriginCheck` is set to `false`.
