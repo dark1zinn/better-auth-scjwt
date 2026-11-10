@@ -4,6 +4,7 @@ import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import { parseSetCookieHeader, setSessionCookie } from "better-auth/cookies";
+import { bearer } from "better-auth/plugins";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import { kAPIErrorHeaderSymbol } from "better-call";
 import { decodeJwt } from "jose";
@@ -328,6 +329,27 @@ describe("terminal SCJWT session finalizer", () => {
 			plugins: [scjwt(), scjwt()],
 		});
 		await expect(auth.$context).rejects.toThrow("[scjwt] register scjwt() exactly once.");
+	});
+
+	test("refuses to start alongside Better Auth's bearer() plugin", async () => {
+		for (const tokenPlacement of PLACEMENTS) {
+			for (const order of ["scjwt-first", "bearer-first"] as const) {
+				const plugins =
+					order === "scjwt-first"
+						? [scjwt({ tokenPlacement }), bearer()]
+						: [bearer(), scjwt({ tokenPlacement })];
+				const auth = betterAuth({
+					database: memoryAdapter(createMemoryDB()),
+					baseURL: TEST_BASE_URL,
+					secret: TEST_SECRET,
+					emailAndPassword: { enabled: true },
+					plugins,
+				});
+				await expect(auth.$context).rejects.toThrow(
+					"[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt()",
+				);
+			}
+		}
 	});
 
 	test("header placement withholds the token while a two-factor challenge is pending", async () => {

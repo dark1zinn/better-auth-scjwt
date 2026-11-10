@@ -35,19 +35,16 @@ Severity reflects impact on authentication under the stated condition, not gener
 | 16 | Root tests were not type-checked; doing so exposed a transport test that signed a token from an unrelated empty database and so proved nothing | Test suite | Test gap | Fixed: `tsconfig.test.json`, `typecheck` scripts, checked row access | `b7237a1` |
 | 17 | No CI | Repository | Process | Fixed: pinned, read-only workflow running the commands above per job and per E2E profile | `74a8839` |
 | 18 | The development shell lacked Node.js, required by Node-based tooling and the packed-consumer check | Development | Low | Fixed: `nodejs_24` in the flake | `cec0a18` |
+| 19 | With Better Auth's `bearer()` registered next to `scjwt()` in cookie placement, the native session token from a sign-up or sign-in response body authenticated as `Authorization: Bearer` (`200` with the user), because `bearer()` turns it into a native session cookie that SCJWT never sees, skipping fingerprint and custom-claim checks. Header placement rejected it (`401`) | `bearer()` registered alongside `scjwt()` | High (conditional) | Fixed: initialization fails when `bearer()` is registered, in either order; header placement replaces it. Breaking for such configurations | `fix(security)!: reject the Better Auth bearer plugin alongside scjwt` |
 
 ## Reviewed and not treated as defects
 
 - **Revocation with cookie cache.** The before-hook resolves the session through `internalAdapter.findSession` before any endpoint runs, so a revoked session is rejected even with a fresh `session_data` cookie. Covered in `test/session-cache.test.ts`.
 - **Token cryptography.** HS256 is pinned, the issuer is checked, `kid` only selects a configured Better Auth secret version (no trial decryption, no remote keys), claims are validated as finite JSON with prototype-safe accumulation, and the `sid`/subject/expiry/fingerprint checks run against the store. No signature, algorithm-confusion, key-selection, or prototype-pollution bypass was found. Adding `aud`/`typ` requirements was considered and not adopted: SCJWTs are only accepted by the instance whose secret and issuer signed them, and no cross-token confusion path was demonstrated.
-- **Native `token` fields in response bodies.** Better Auth sign-up, sign-in, two-factor verification, and admin session listings return the opaque native session token in JSON. SCJWT does not rewrite these bodies because Better Auth's revoke endpoints consume them. With SCJWT alone that token does not authenticate: in cookie placement it is rejected as a cookie (`401`) and ignored as a Bearer value (`200` with a `null` session); in header placement it is ignored as a cookie and rejected as a Bearer value (`401`). It is still a session secret: treat these responses accordingly. See the open item below for Better Auth's `bearer()` plugin, which changes this.
+- **Native `token` fields in response bodies.** Better Auth sign-up, sign-in, two-factor verification, and admin session listings return the opaque native session token in JSON. SCJWT does not rewrite these bodies because Better Auth's revoke endpoints consume them. That token does not authenticate: in cookie placement it is rejected as a cookie (`401`) and ignored as a Bearer value (`200` with a `null` session); in header placement it is ignored as a cookie and rejected as a Bearer value (`401`). The one plugin that would have accepted it, `bearer()`, is now refused (finding 19). It is still a session secret: treat these responses accordingly.
 - **Fingerprint strength.** User-Agent and `Sec-CH-UA-Platform` are client-supplied and the IP depends on proxy configuration. When no IP resolves, `strict` binds only browser headers and `ip-only` binds nothing. This was kept for compatibility with server-to-server and IP-less deployments and is documented and tested rather than changed.
 - **Header placement and CSRF.** Bearer tokens are not ambient, so Better Auth does not origin-check them; CORS governs which origins can send `Authorization` or read `set-auth-token`.
 - **`onResponse` finalization.** Moving issuance to `onResponse` would order it after every hook but skip direct `auth.api` calls, so the `init`-appended finalizer was chosen instead.
-
-## Open item awaiting a decision
-
-- **Better Auth `bearer()` together with SCJWT.** Probed against 1.7.18: with `plugins: [scjwt(), bearer()]` in cookie placement, sending the native token from a sign-up response body as `Authorization: Bearer` authenticates (`200` with the user), because `bearer()` converts it into a native session cookie that SCJWT never sees, so fingerprint and custom-claim checks are skipped. Header placement still rejects it (`401`). Both plugins own the session transport, so the combination is incoherent; until a fix lands, do not register `bearer()` alongside `scjwt()`.
 
 ## Remaining boundaries and limitations
 
@@ -65,7 +62,7 @@ Results from the final branch state:
 | Check | Result |
 |---|---|
 | `bun run typecheck` (src; src + test + scripts) | pass |
-| `bun test` | 116 tests across 11 files pass |
+| `bun test` | 117 tests across 11 files pass |
 | `bun run test:package` | Node.js 24.20.0 and Bun 1.4.2 runtime imports pass; `bundler` and `NodeNext` consumer type checks pass with `skipLibCheck` off; 14 packed files verified |
 | `bun run --cwd examples/nestjs typecheck` / `test` / `build` | pass / 1 test pass / pass |
 | `bun run --cwd examples/nestjs test:e2e` | 9 profiles, 51 tests pass |

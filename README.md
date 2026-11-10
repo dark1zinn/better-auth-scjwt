@@ -203,7 +203,7 @@ The fingerprint constrains replay; it is not proof of device possession. User-Ag
 - Custom-claim mismatch returns `401` without deleting the session.
 - CSRF: cookie placement is an ambient credential, and Better Auth's origin check rejects state-changing requests from untrusted or missing `Origin` exactly as for native session cookies. Header placement is not ambient (a script must attach `Authorization`), so Better Auth does not origin-check Bearer requests; restrict callers with CORS. Better Auth disables its origin check when `NODE_ENV` is `test` unless `advanced.disableOriginCheck` is set to `false`.
 - Direct `auth.api` calls do not pass through Better Auth's HTTP router, so its origin and CSRF checks do not run; routes that forward browser headers to `auth.api` must validate `Origin` themselves (see Better Auth's [security reference](https://better-auth.com/docs/reference/security)).
-- Do not register Better Auth's `bearer()` plugin with `scjwt()`. Both own the session transport, and in cookie placement `bearer()` turns the native session token returned in sign-in and sign-up response bodies into an authenticated session without SCJWT's fingerprint and claim checks.
+- Better Auth's `bearer()` plugin cannot be registered with `scjwt()`; initialization fails with `[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt()`. Both own the session transport, and in cookie placement `bearer()` would turn the native session token returned in sign-in and sign-up response bodies into an authenticated session without SCJWT's fingerprint and claim checks. Use `scjwt({ tokenPlacement: "header" })` for `Authorization: Bearer` clients.
 - Revocation audit: [`docs/REVOKE_AUDIT.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/REVOKE_AUDIT.md). Security review and known limitations: [`docs/SECURITY_REVIEW.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/SECURITY_REVIEW.md).
 
 ## Migration
@@ -211,6 +211,10 @@ The fingerprint constrains replay; it is not proof of device possession. User-Ag
 ### Tokens issued before the `remember` claim
 
 `remember` is a required claim. Tokens issued by earlier 0.1.x builds lack it and are rejected with `401`; users sign in again to receive a replacement. No database migration is involved, and there is no fallback that accepts the old shape.
+
+### Configurations that also register `bearer()`
+
+Remove Better Auth's `bearer()` plugin. To keep `Authorization: Bearer` clients, set `scjwt({ tokenPlacement: "header" })`; clients then read the SCJWT from `set-auth-token` and send it back as the Bearer value. Native session tokens that clients stored from `bearer()` no longer authenticate.
 
 ### From 0.0.x
 

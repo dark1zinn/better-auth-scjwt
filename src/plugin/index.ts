@@ -1,6 +1,7 @@
 import type { BetterAuthOptions, BetterAuthPlugin } from "better-auth";
 import { createAuthMiddleware } from "better-auth/api";
 import {
+	BEARER_PLUGIN_ID,
 	DEFAULT_FINGERPRINT_MODE,
 	DEFAULT_TOKEN_PLACEMENT,
 	FINALIZER_PLUGIN_ID,
@@ -53,6 +54,13 @@ export function scjwt(options: ScjwtOptions = {}): BetterAuthPlugin {
 				plugins.some((plugin) => plugin.id === FINALIZER_PLUGIN_ID)
 			) {
 				throw new Error("[scjwt] register scjwt() exactly once.");
+			}
+			// bearer() turns a native session token from `Authorization` into a session
+			// cookie that SCJWT never verifies, bypassing fingerprint and claim checks.
+			if (plugins.some((plugin) => plugin.id === BEARER_PLUGIN_ID)) {
+				throw new Error(
+					'[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt(); use scjwt({ tokenPlacement: "header" }) for Authorization: Bearer transport.',
+				);
 			}
 			return {
 				options: { plugins: [finalizer] } satisfies Partial<BetterAuthOptions>,
