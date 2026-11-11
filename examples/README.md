@@ -6,7 +6,7 @@ Framework examples exercise `better-auth-scjwt` through production-style applica
 
 `examples/nestjs` is a Bun-run NestJS application generated with the Nest CLI. It uses the community-maintained `@thallesp/nestjs-better-auth` Express integration, Better Auth 1.7.18's Bun-native SQLite support, email/password authentication, and the local `better-auth-scjwt` package. Nest body parsing is disabled at application creation so the Better Auth integration can consume auth request bodies correctly.
 The app registers a narrow Nest exception filter for Better Auth `APIError` values so invalid or revoked SCJWTs encountered by the integration's global guard retain their `401` status instead of becoming generic server errors.
-The example consumes the root package through `file:../..`. Its `build`, `test`, and `test:e2e` scripts first run `sync:scjwt`, which rebuilds the root `dist` and refreshes the local copy with `bun install --frozen-lockfile --ignore-scripts --force`, so tests never load a stale `dist` and a refresh can neither rerun lifecycle scripts nor change locked dependency versions.
+The example consumes the root package through `file:../..`. Its `build`, `test`, `test:e2e`, `typecheck`, `auth:migrate`, and `start:dev` scripts first run `sync:scjwt`, which rebuilds the root `dist` and refreshes the local copy with `bun install --frozen-lockfile --ignore-scripts --force`, so they never load a missing or stale `dist` and a refresh can neither rerun lifecycle scripts nor change locked dependency versions.
 
 The only application-owned routes are:
 

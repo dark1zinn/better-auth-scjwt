@@ -9,9 +9,11 @@
   "scripts": {
     "prebuild": "bun run sync:scjwt",
     "build": "nest build",
+    "preauth:migrate": "bun run sync:scjwt",
     "auth:migrate": "bunx --bun auth migrate --config ./src/auth.ts --yes",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start --exec bun",
+    "prestart:dev": "bun run sync:scjwt",
     "start:dev": "nest start --watch --exec bun",
     "start:debug": "nest start --debug --watch --exec bun",
     "start:prod": "bun dist/main.js",
