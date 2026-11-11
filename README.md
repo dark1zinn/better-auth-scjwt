@@ -8,6 +8,10 @@ Session-Centric JWT transport for [Better Auth](https://better-auth.com). The pl
 bun add better-auth-scjwt better-auth @better-auth/core jose
 ```
 
+Git installs (`github:dark1zinn/better-auth-scjwt#<sha>`) have no committed `dist/`. Their `prepare` script builds it during install in an isolated temporary directory, so the build's devDependencies never touch your project. Bun runs lifecycle scripts only for packages listed in `trustedDependencies`, so add `"trustedDependencies": ["better-auth-scjwt"]` to the consuming `package.json`. Packed (published) installs ship `dist/` already and skip the build.
+
+Add the trust entry before installing the Git dependency. If Bun already installed it untrusted, it skipped `prepare` and `dist/` is missing; run `bun pm trust better-auth-scjwt`, which records the trust and runs the skipped build.
+
 Supported peer ranges:
 
 - `better-auth` and `@better-auth/core`: `~1.7.18` (tested against 1.7.18; 1.8 is not yet supported)
@@ -239,6 +243,7 @@ bun run typecheck
 bun test
 bun run build
 bun run test:package
+bun run test:git --dependency <specifier>
 ```
 
 `bun run typecheck` checks `src` with the strict, isolated-declaration settings used for publishing (`tsconfig.json`) and then `src`, `test`, and `scripts` together (`tsconfig.test.json`), so the integration suites that carry the security guarantees are type-checked too. The packed-consumer fixtures in `test/consumer` are excluded there because `test:package` checks them under their own module-resolution settings. `bun run --cwd examples/nestjs typecheck` does the same for the NestJS example.
