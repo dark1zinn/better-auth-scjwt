@@ -6,7 +6,10 @@ export default defineConfig({
 		client: "src/client.ts",
 	},
 	format: ["esm"],
-	dts: true,
+	// One declaration pipeline: TypeScript 7 (tsgo) emits declarations and
+	// rolldown-plugin-dts bundles index/client .d.mts with explicit extensions.
+	// scripts/check-package.ts verifies the packed result under bundler and NodeNext.
+	dts: { generator: "tsgo" },
 	clean: true,
 	deps: {
 		neverBundle: [

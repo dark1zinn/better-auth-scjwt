@@ -4,7 +4,6 @@ import { memoryAdapter } from "better-auth/adapters/memory";
 import { admin, testUtils } from "better-auth/plugins";
 import { scjwt } from "../src/plugin/index";
 import {
-	STABLE_HEADERS,
 	TEST_BASE_URL,
 	TEST_SECRET,
 	createCookieHeaders,

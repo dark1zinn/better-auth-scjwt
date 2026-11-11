@@ -15,8 +15,11 @@ import {
 	createCookieHeaders,
 	createMemoryDB,
 	requestSession,
+	rowAt,
 	signUpWithScjwt,
 } from "./helpers/native-auth";
+
+const RAW_REDIRECT_STATUSES = [302, 303, 307] as const;
 
 function createCallbackFixture(getUserId: () => string): BetterAuthPlugin {
 	async function establishSession<Path extends string>(
@@ -79,6 +82,30 @@ function createCallbackFixture(getUserId: () => string): BetterAuthPlugin {
 					return new Response("callback failed", { status: 422 });
 				},
 			),
+			callbackServerFailureFixture: createAuthEndpoint(
+				"/callback-fixture-server-failure",
+				{ method: "POST" },
+				async (ctx) => {
+					await establishSession(ctx);
+					return new Response("callback crashed", { status: 500 });
+				},
+			),
+			...Object.fromEntries(
+				RAW_REDIRECT_STATUSES.map((status) => [
+					`callbackRawRedirect${status}Fixture`,
+					createAuthEndpoint(
+						`/callback-fixture-raw-redirect-${status}`,
+						{ method: "POST" },
+						async (ctx) => {
+							await establishSession(ctx);
+							return new Response(null, {
+								status,
+								headers: { location: "/signed-in" },
+							});
+						},
+					),
+				]),
+			),
 		},
 	};
 }
@@ -113,7 +140,7 @@ describe("native Better Auth session transport", () => {
 		expect(body.user.email).toBe("native-cookie@example.com");
 
 		const payload = decodeJwt(issued.token);
-		const backingSession = db.session[0];
+		const backingSession = rowAt(db.session);
 		expect(payload.exp).toBeLessThanOrEqual(
 			Math.floor(new Date(backingSession.expiresAt).getTime() / 1000),
 		);
@@ -184,7 +211,7 @@ describe("native Better Auth session transport", () => {
 
 		const serializedNativeCookie = await serializeSignedCookie(
 			"",
-			db.session[0].token,
+			rowAt(db.session).token,
 			context.secret,
 		);
 		const nativeSessionCookie = decodeURIComponent(
@@ -300,6 +327,51 @@ describe("native Better Auth session transport", () => {
 		}
 	});
 
+	test("issues usable SCJWTs on raw redirect responses and keeps the redirect", async () => {
+		for (const tokenPlacement of ["cookie", "header"] as const) {
+			for (const status of RAW_REDIRECT_STATUSES) {
+				let fixtureUserId = "";
+				const auth = betterAuth({
+					database: memoryAdapter(createMemoryDB()),
+					baseURL: TEST_BASE_URL,
+					secret: TEST_SECRET,
+					plugins: [
+						testUtils(),
+						createCallbackFixture(() => fixtureUserId),
+						scjwt({ tokenPlacement }),
+					],
+				});
+				const context = await auth.$context;
+				const user = await context.test.saveUser(context.test.createUser());
+				fixtureUserId = user.id;
+				const response = await auth.handler(
+					new Request(
+						`${TEST_BASE_URL}/api/auth/callback-fixture-raw-redirect-${status}`,
+						{ method: "POST", headers: STABLE_HEADERS },
+					),
+				);
+				expect(response.status).toBe(status);
+				expect(response.headers.get("location")).toBe("/signed-in");
+				const sessionCookie = parseSetCookieHeader(
+					response.headers.get("set-cookie") ?? "",
+				).get(context.authCookies.sessionToken.name);
+				const token = tokenPlacement === "cookie"
+					? sessionCookie?.value
+					: response.headers.get("set-auth-token");
+				expect(token?.split(".")).toHaveLength(3);
+				if (tokenPlacement === "header") {
+					expect(sessionCookie).toBeUndefined();
+				}
+				const headers = tokenPlacement === "cookie"
+					? createCookieHeaders(context.authCookies.sessionToken.name, token ?? "")
+					: new Headers({ ...STABLE_HEADERS, authorization: `Bearer ${token}` });
+				const sessionResponse = await requestSession(auth, headers);
+				expect(sessionResponse.status).toBe(200);
+				expect(await sessionResponse.json()).toMatchObject({ user: { id: user.id } });
+			}
+		}
+	});
+
 	test("preserves an existing session on unrelated failed requests", async () => {
 		const db = createMemoryDB();
 		const auth = betterAuth({
@@ -352,6 +424,7 @@ describe("native Better Auth session transport", () => {
 			for (const [path, status] of [
 				["callback-fixture-failure", 400],
 				["callback-fixture-response-failure", 422],
+				["callback-fixture-server-failure", 500],
 			] as const) {
 				const response = await auth.handler(
 					new Request(`${TEST_BASE_URL}/api/auth/${path}`, {
@@ -389,7 +462,7 @@ describe("native Better Auth session transport", () => {
 		});
 		const issued = await signUpWithScjwt(auth, "refresh@example.com");
 		const sessionId = decodeJwt(issued.token).sid;
-		const expiresBefore = new Date(db.session[0].expiresAt).getTime();
+		const expiresBefore = new Date(rowAt(db.session).expiresAt).getTime();
 		// Advance the mocked clock so the refresh changes iat/expiresAt without sleeping.
 		setSystemTime(new Date(Date.now() + 2000));
 		let refreshed: Response;
@@ -406,7 +479,7 @@ describe("native Better Auth session transport", () => {
 		expect(replacement.split(".")).toHaveLength(3);
 		expect(replacement).not.toBe(issued.token);
 		expect(decodeJwt(replacement).sid).toBe(sessionId);
-		expect(new Date(db.session[0].expiresAt).getTime()).toBeGreaterThan(
+		expect(new Date(rowAt(db.session).expiresAt).getTime()).toBeGreaterThan(
 			expiresBefore,
 		);
 
@@ -593,6 +666,110 @@ describe("core Better Auth revocation paths", () => {
 		expect(response.status).toBe(401);
 		expect((await signIn(auth, email)).status).toBe(401);
 		expect((await signIn(auth, email, `${PASSWORD}-reset`)).status).toBe(200);
+	});
+});
+
+describe("HTTP transport boundaries", () => {
+	function createAuth(tokenPlacement: "cookie" | "header", db = createMemoryDB()) {
+		return betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			// Better Auth skips origin checks when NODE_ENV is "test"; restore production behavior.
+			advanced: { disableOriginCheck: false },
+			session: {
+				additionalFields: { deviceLabel: { type: "string", required: false } },
+			},
+			plugins: [scjwt({ tokenPlacement })],
+		});
+	}
+
+	function updateSession(
+		auth: ReturnType<typeof createAuth>,
+		headers: Headers,
+		origin: string | null,
+	) {
+		const request = new Headers(headers);
+		request.set("content-type", "application/json");
+		if (origin) request.set("origin", origin);
+		return auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/update-session`, {
+				method: "POST",
+				headers: request,
+				body: JSON.stringify({ deviceLabel: "changed" }),
+			}),
+		);
+	}
+
+	test("cookie placement keeps Better Auth's origin check for state-changing requests", async () => {
+		const auth = createAuth("cookie");
+		const issued = await signUpWithScjwt(auth, "origin-cookie@example.com");
+		const headers = createCookieHeaders(issued.cookieName, issued.token);
+		for (const origin of ["https://evil.example.com", null]) {
+			const rejected = await updateSession(auth, headers, origin);
+			expect(rejected.status).toBe(403);
+			expect(rejected.headers.get("set-cookie")).toBeNull();
+		}
+		const session = (await (await requestSession(auth, headers)).json()) as {
+			session: { deviceLabel?: string | null };
+		};
+		expect(session.session.deviceLabel ?? null).toBeNull();
+		const accepted = await updateSession(auth, headers, TEST_BASE_URL);
+		expect(accepted.status).toBe(200);
+		expect(readIssuedCookieToken(accepted, issued.cookieName).split(".")).toHaveLength(3);
+	});
+
+	test("header placement is not ambient, so Better Auth does not origin-check Bearer requests", async () => {
+		const auth = createAuth("header");
+		const issued = await signUpWithScjwt(auth, "origin-header@example.com");
+		const headers = new Headers({ ...STABLE_HEADERS, authorization: `Bearer ${issued.token}` });
+		const response = await updateSession(auth, headers, "https://evil.example.com");
+		expect(response.status).toBe(200);
+		expect(response.headers.get("set-auth-token")?.split(".")).toHaveLength(3);
+	});
+
+	test("a present but invalid credential never falls back to the other transport", async () => {
+		const db = createMemoryDB();
+		const auth = createAuth("header", db);
+		const issued = await signUpWithScjwt(auth, "no-fallback-header@example.com");
+		const context = await auth.$context;
+		// A validly signed native session cookie for the live session.
+		const nativeCookie = decodeURIComponent(
+			(await serializeSignedCookie("", rowAt(db.session).token, context.secret)).replace(
+				"=",
+				"",
+			),
+		);
+		const nativeOnly = createCookieHeaders(issued.cookieName, nativeCookie);
+		// Header placement ignores the native cookie entirely when no Bearer is present.
+		expect(await (await requestSession(auth, nativeOnly)).json()).toBeNull();
+		const headers = createCookieHeaders(issued.cookieName, nativeCookie);
+		headers.set("authorization", "Bearer not.a.jwt");
+		expect((await requestSession(auth, headers)).status).toBe(401);
+
+		const cookieAuth = createAuth("cookie");
+		const cookieIssued = await signUpWithScjwt(cookieAuth, "no-fallback-cookie@example.com");
+		const cookieHeaders = createCookieHeaders(cookieIssued.cookieName, "not.a.jwt");
+		cookieHeaders.set("authorization", `Bearer ${cookieIssued.token}`);
+		expect((await requestSession(cookieAuth, cookieHeaders)).status).toBe(401);
+	});
+
+	test("parses only the Bearer scheme and treats empty credentials as missing", async () => {
+		const auth = createAuth("header");
+		const issued = await signUpWithScjwt(auth, "bearer-parsing@example.com");
+		const withAuthorization = (value: string) =>
+			requestSession(auth, new Headers({ ...STABLE_HEADERS, authorization: value }));
+		const lowercase = await withAuthorization(`bearer ${issued.token}`);
+		expect(await lowercase.json()).toMatchObject({
+			user: { email: "bearer-parsing@example.com" },
+		});
+		for (const missing of ["Bearer", "Bearer    ", `Basic ${issued.token}`, issued.token]) {
+			const response = await withAuthorization(missing);
+			expect(response.status).toBe(200);
+			expect(await response.json()).toBeNull();
+		}
+		expect((await withAuthorization("Bearer a.b")).status).toBe(401);
 	});
 });
 

@@ -12,7 +12,15 @@ export const STABLE_HEADERS = {
 	"user-agent": "better-auth-scjwt-test",
 	"sec-ch-ua-platform": '"Linux"',
 } as const;
-type HeaderInput = ConstructorParameters<typeof Headers>[0];
+export type HeaderInput = ConstructorParameters<typeof Headers>[0];
+type Row = Record<string, any>;
+/** Memory adapter tables used by the suites; `twoFactor` and others can be added per test. */
+export type TestDB = MemoryDB & {
+	user: Row[];
+	session: Row[];
+	account: Row[];
+	verification: Row[];
+};
 
 interface MintContext {
 	options: Parameters<typeof getRequestFingerprintInput>[1];
@@ -31,8 +39,17 @@ export interface IssuedToken {
 	token: string;
 }
 
-export function createMemoryDB(): MemoryDB {
+export function createMemoryDB(): TestDB {
 	return { user: [], session: [], account: [], verification: [] };
+}
+
+/** Returns the memory-adapter row at `index`, failing the test when it is absent. */
+export function rowAt(rows: Row[], index = 0): Row {
+	const row = rows[index];
+	if (!row) {
+		throw new Error(`expected a memory-adapter row at index ${index}`);
+	}
+	return row;
 }
 
 export async function signUpWithScjwt(
@@ -110,6 +127,7 @@ export async function mintScjwt(
 			Math.floor(new Date(session.expiresAt).getTime() / 1000),
 			issuedAt + context.sessionConfig.expiresIn,
 		),
+		remember: true,
 		issuedAt,
 	});
 }

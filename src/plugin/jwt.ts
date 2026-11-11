@@ -18,6 +18,7 @@ const CORE_CLAIMS: Record<string, true> = {
 	iat: true,
 	exp: true,
 	sid: true,
+	remember: true,
 };
 const RESERVED_CLAIMS: Record<string, true> = {
 	...CORE_CLAIMS,
@@ -42,10 +43,13 @@ export interface BuildJwtPayloadParams {
 	fingerprint: string;
 	sessionId: string;
 	expiresAt: number;
+	/** `false` for Better Auth `rememberMe: false` sessions, which must not slide. */
+	remember: boolean;
 	issuedAt?: number;
 	customClaims?: CustomClaims;
 }
 
+/** Builds and validates the core payload plus optional custom claims. */
 export function buildJwtPayload(params: BuildJwtPayloadParams): ScjwtJwtPayload {
 	const iat = params.issuedAt ?? Math.floor(Date.now() / 1000);
 	const customClaims = params.customClaims ?? {};
@@ -57,12 +61,14 @@ export function buildJwtPayload(params: BuildJwtPayloadParams): ScjwtJwtPayload 
 		iat,
 		exp: params.expiresAt,
 		sid: params.sessionId,
+		remember: params.remember,
 		...customClaims,
 	};
 	assertValidCorePayload(payload);
 	return payload;
 }
 
+/** Signs a validated payload with HS256 using Better Auth's current secret version. */
 export async function signJwt(
 	secretConfig: ScjwtSecretConfig,
 	payload: ScjwtJwtPayload,
@@ -82,6 +88,7 @@ export async function signJwt(
 		.sign(new TextEncoder().encode(signing.secret));
 }
 
+/** Builds the payload from its parts and signs it. */
 export async function signJwtFromParts(
 	params: BuildJwtPayloadParams & { secretConfig: ScjwtSecretConfig },
 ): Promise<string> {
@@ -89,6 +96,7 @@ export async function signJwtFromParts(
 	return signJwt(secretConfig, buildJwtPayload(payloadParams));
 }
 
+/** Verifies signature, algorithm, issuer, and expiry, then parses the payload. */
 export async function verifyJwt(
 	params: VerifyJwtParams,
 ): Promise<ScjwtJwtPayload> {
@@ -112,6 +120,7 @@ export async function verifyJwt(
 	return parseJwtPayload(rawPayload, params.allowCustomClaims ?? false);
 }
 
+/** Validates claim types and shape; custom claims are rejected unless allowed. */
 export function parseJwtPayload(
 	payload: JWTPayload,
 	allowCustomClaims = false,
@@ -134,12 +143,14 @@ export function parseJwtPayload(
 		iat: readIntegerClaim(payload, "iat"),
 		exp: readIntegerClaim(payload, "exp"),
 		sid: readStringClaim(payload, "sid"),
+		remember: readBooleanClaim(payload, "remember"),
 		...(customClaims as CustomClaims),
 	};
 	assertValidCorePayload(parsed);
 	return parsed;
 }
 
+/** Returns the non-core claims in a prototype-free object. */
 export function getCustomClaims(payload: ScjwtJwtPayload): CustomClaims {
 	const customClaims = Object.create(null) as CustomClaims;
 	for (const [key, value] of Object.entries(payload)) {
@@ -150,6 +161,7 @@ export function getCustomClaims(payload: ScjwtJwtPayload): CustomClaims {
 	return customClaims;
 }
 
+/** Asserts claims are bounded, non-reserved, finite JSON in a plain object. */
 export function validateCustomClaims(value: unknown): asserts value is CustomClaims {
 	if (!isPlainObject(value)) {
 		throw new Error("[scjwt] custom claims must be a plain JSON object.");
@@ -174,8 +186,11 @@ export function validateCustomClaims(value: unknown): asserts value is CustomCla
 	}
 }
 
+/** Structural JSON equality, independent of object key order. */
 export function jsonValuesEqual(left: JsonValue, right: JsonValue): boolean {
-	if (Object.is(left, right)) {
+	// Strict equality matches JSON semantics: claims are validated finite, and
+	// JSON serializes -0 as 0, so Object.is would reject a round-tripped -0.
+	if (left === right) {
 		return true;
 	}
 	if (Array.isArray(left) || Array.isArray(right)) {
@@ -200,6 +215,7 @@ export function jsonValuesEqual(left: JsonValue, right: JsonValue): boolean {
 	return false;
 }
 
+/** Recursively checks one claim value against the JSON, depth, and cycle limits. */
 function validateJsonValue(
 	value: unknown,
 	depth: number,
@@ -245,6 +261,7 @@ function validateJsonValue(
 	ancestors.delete(value);
 }
 
+/** Whether `value` is an object literal or a null-prototype object. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) {
 		return false;
@@ -253,6 +270,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return prototype === Object.prototype || prototype === null;
 }
 
+/** Current signing secret and its `kid` for versioned Better Auth secrets. */
 function getSigningSecret(config: ScjwtSecretConfig): {
 	secret: string;
 	kid?: string;
@@ -267,6 +285,7 @@ function getSigningSecret(config: ScjwtSecretConfig): {
 	return { secret, kid: String(config.currentVersion) };
 }
 
+/** Selects the verification secret from the token's `kid` without trial decryption. */
 function getVerificationSecret(
 	config: ScjwtSecretConfig,
 	token: string,
@@ -288,6 +307,7 @@ function getVerificationSecret(
 	return secret;
 }
 
+/** Reads a required string claim. */
 function readStringClaim(payload: JWTPayload, claim: string): string {
 	const value = payload[claim];
 	if (typeof value !== "string") {
@@ -296,6 +316,16 @@ function readStringClaim(payload: JWTPayload, claim: string): string {
 	return value;
 }
 
+/** Reads a required boolean claim. */
+function readBooleanClaim(payload: JWTPayload, claim: string): boolean {
+	const value = payload[claim];
+	if (typeof value !== "boolean") {
+		throw new Error(`[scjwt] JWT claim "${claim}" must be a boolean.`);
+	}
+	return value;
+}
+
+/** Reads a required integer claim. */
 function readIntegerClaim(payload: JWTPayload, claim: string): number {
 	const value = payload[claim];
 	if (typeof value !== "number" || !Number.isInteger(value)) {
@@ -304,6 +334,7 @@ function readIntegerClaim(payload: JWTPayload, claim: string): number {
 	return value;
 }
 
+/** Validates the core claims shared by signing and verification. */
 function assertValidCorePayload(payload: ScjwtJwtPayload): void {
 	if (!payload.iss.trim()) {
 		throw new Error("[scjwt] JWT payload iss must be a non-empty string.");
@@ -327,5 +358,8 @@ function assertValidCorePayload(payload: ScjwtJwtPayload): void {
 	}
 	if (!payload.sid.trim()) {
 		throw new Error("[scjwt] JWT payload sid must be a non-empty string.");
+	}
+	if (typeof payload.remember !== "boolean") {
+		throw new Error("[scjwt] JWT payload remember must be a boolean.");
 	}
 }

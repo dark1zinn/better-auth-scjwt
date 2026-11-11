@@ -140,3 +140,67 @@ describe('NestJS Admin RBAC profile', () => {
     expect(defaultStatements.session).toContain('revoke');
   });
 });
+
+describe('NestJS Admin RBAC profile with the Better Auth cookie cache', () => {
+  let harness: ProfileHarness<[ReturnType<typeof admin>]>;
+
+  beforeAll(async () => {
+    harness = await createNestAuthHarness({
+      name: 'rbac-cookie-cache',
+      additionalPlugins: [admin(rbacAdminOptions)],
+      session: { cookieCache: { enabled: true, maxAge: 300 } },
+    });
+  });
+
+  afterAll(async () => {
+    await harness?.close();
+  });
+
+  it('applies a live role downgrade without waiting for the cached snapshot to expire', async () => {
+    const adminClient = harness.createClient();
+    const adminSignup = await adminClient.post('/api/auth/sign-up/email', {
+      name: 'Cache Admin',
+      email: 'cache-admin@example.com',
+      password: PASSWORD,
+    });
+    expect(adminSignup.status).toBe(200);
+    await harness.context.internalAdapter.updateUser(
+      (adminSignup.body.user as UserRecord).id,
+      { role: 'admin' },
+    );
+    const userClient = harness.createClient();
+    const userSignup = await userClient.post('/api/auth/sign-up/email', {
+      name: 'Cache User',
+      email: 'cache-user@example.com',
+      password: PASSWORD,
+    });
+    expect(userSignup.status).toBe(200);
+    const userId = (userSignup.body.user as UserRecord).id;
+    const promoted = await adminClient.post('/api/auth/admin/set-role', {
+      userId,
+      role: 'auditor',
+    });
+    expect(promoted.status).toBe(200);
+
+    const asAuditor = await userClient.get('/api/auth/get-session');
+    expect(asAuditor.status).toBe(200);
+    expect((asAuditor.body.user as UserRecord).role).toBe('auditor');
+    // The client now holds a fresh snapshot that still says "auditor".
+    expect(
+      userClient.cookie(harness.context.authCookies.sessionData.name),
+    ).toBeTruthy();
+
+    const downgraded = await adminClient.post('/api/auth/admin/set-role', {
+      userId,
+      role: 'user',
+    });
+    expect(downgraded.status).toBe(200);
+    const asUser = await userClient.get('/api/auth/get-session');
+    expect((asUser.body.user as UserRecord).role).toBe('user');
+    const read = await userClient.post('/api/auth/admin/has-permission', {
+      permissions: { project: ['read'] },
+    });
+    expect(read.status).toBe(200);
+    expect(read.body).toEqual({ error: null, success: false });
+  });
+});

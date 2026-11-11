@@ -7,6 +7,7 @@ export interface RequestFingerprintInput {
 	platform: string;
 }
 
+/** Fingerprint inputs: Better Auth's resolved IP, plus browser headers in strict mode. */
 export function getRequestFingerprintInput(
 	headers: Headers,
 	options: Parameters<typeof getIP>[1],

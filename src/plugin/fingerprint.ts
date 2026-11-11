@@ -1,5 +1,6 @@
 const FINGERPRINT_HEX_LENGTH = 64;
 
+/** Lowercase hex SHA-256 over an unambiguous encoding of the fingerprint inputs. */
 export async function computeFingerprint(
 	ip: string,
 	ua: string,

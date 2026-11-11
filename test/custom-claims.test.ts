@@ -18,6 +18,7 @@ import {
 	createCookieHeaders,
 	createMemoryDB,
 	requestSession,
+	rowAt,
 	signUpWithScjwt,
 } from "./helpers/native-auth";
 
@@ -32,6 +33,7 @@ function tokenParts(customClaims?: Record<string, never | string | number | bool
 		fingerprint: FINGERPRINT,
 		sessionId: "claims-session",
 		expiresAt: issuedAt + 3600,
+		remember: true,
 		issuedAt,
 		customClaims,
 	};
@@ -72,7 +74,7 @@ describe("custom SCJWT claims", () => {
 			flags: ["read", true],
 		});
 
-		db.session[0].updatedAt = new Date(0);
+		rowAt(db.session).updatedAt = new Date(0);
 		const refreshed = await requestSession(
 			auth,
 			createCookieHeaders(issued.cookieName, issued.token),
@@ -82,7 +84,8 @@ describe("custom SCJWT claims", () => {
 			refreshed.headers.get("set-cookie") ?? "",
 		).get(issued.cookieName)?.value;
 		expect(refreshedToken?.split(".")).toHaveLength(3);
-		expect(seen.length).toBeGreaterThanOrEqual(3);
+		// Issuance, verification of the presented token, and re-issuance on refresh.
+		expect(seen).toHaveLength(3);
 		expect(seen.every((entry) => entry.email === "resolver@example.com")).toBe(true);
 		expect(seen.every((entry) => entry.hasRequest)).toBe(true);
 	});
@@ -105,6 +108,82 @@ describe("custom SCJWT claims", () => {
 		);
 		expect(response.status).toBe(401);
 		expect(db.session).toHaveLength(1);
+	});
+
+	test("authenticates claims whose numbers change representation through JSON", async () => {
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [
+				scjwt({
+					getCustomClaims: () => ({
+						offset: -0,
+						nested: { values: [-0, 1.5, { zero: -0 }] },
+					}),
+				}),
+			],
+		});
+		const issued = await signUpWithScjwt(auth, "negative-zero@example.com");
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const response = await requestSession(
+				auth,
+				createCookieHeaders(issued.cookieName, issued.token),
+			);
+			expect(response.status).toBe(200);
+		}
+		expect(db.session).toHaveLength(1);
+	});
+
+	test("rejects a changed numeric claim without deleting the session", async () => {
+		let level = 1;
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [scjwt({ getCustomClaims: () => ({ limits: [level] }) })],
+		});
+		const issued = await signUpWithScjwt(auth, "changed-number@example.com");
+		level = 2;
+		const response = await requestSession(
+			auth,
+			createCookieHeaders(issued.cookieName, issued.token),
+		);
+		expect(response.status).toBe(401);
+		expect(db.session).toHaveLength(1);
+	});
+
+	test("refuses to issue non-finite claims and delivers no credential", async () => {
+		for (const value of [Number.NaN, Number.POSITIVE_INFINITY]) {
+			const auth = betterAuth({
+				database: memoryAdapter(createMemoryDB()),
+				baseURL: TEST_BASE_URL,
+				secret: TEST_SECRET,
+				emailAndPassword: { enabled: true },
+				plugins: [scjwt({ getCustomClaims: () => ({ score: value }) })],
+			});
+			const response = await auth.handler(
+				new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
+					method: "POST",
+					headers: { ...STABLE_HEADERS, "content-type": "application/json" },
+					body: JSON.stringify({
+						name: "Non-finite",
+						email: `non-finite-${String(value)}@example.com`,
+						password: "correct-horse-battery-staple",
+					}),
+				}),
+			);
+			expect(response.status).toBe(500);
+			expect(response.headers.get("set-auth-token")).toBeNull();
+			const sessionCookie = parseSetCookieHeader(
+				response.headers.get("set-cookie") ?? "",
+			).get((await auth.$context).authCookies.sessionToken.name);
+			expect(sessionCookie?.value ?? "").toBe("");
+		}
 	});
 
 	test("keeps the default payload strict and accepts valid configured JSON", async () => {
@@ -182,6 +261,83 @@ describe("custom SCJWT claims", () => {
 		let nested: unknown = "leaf";
 		for (let index = 0; index < 9; index += 1) nested = { nested };
 		expect(() => validateCustomClaims({ nested })).toThrow("8 nested containers");
+	});
+
+	test("accepts claims exactly at the count, size, and depth limits", () => {
+		const sixteen = Object.fromEntries(
+			Array.from({ length: 16 }, (_, index) => [`key${index}`, index]),
+		);
+		expect(() => validateCustomClaims(sixteen)).not.toThrow();
+
+		// {"text":"…"} adds 11 bytes around the string.
+		expect(() => validateCustomClaims({ text: "x".repeat(1013) })).not.toThrow();
+		expect(() => validateCustomClaims({ text: "x".repeat(1014) })).toThrow(
+			"1024 UTF-8 bytes",
+		);
+		// Multi-byte characters count by encoded size: {"t":"…"} adds 8 bytes, "é" is 2.
+		expect(() => validateCustomClaims({ t: "é".repeat(508) })).not.toThrow();
+		expect(() => validateCustomClaims({ t: `${"é".repeat(508)}x` })).toThrow(
+			"1024 UTF-8 bytes",
+		);
+
+		let objects: unknown = "leaf";
+		let arrays: unknown = "leaf";
+		for (let index = 0; index < 8; index += 1) {
+			objects = { nested: objects };
+			arrays = [arrays];
+		}
+		expect(() => validateCustomClaims({ objects, arrays })).not.toThrow();
+		expect(() => validateCustomClaims({ arrays: [arrays] })).toThrow(
+			"8 nested containers",
+		);
+	});
+
+	test("distinguishes cycles from repeated references", () => {
+		const shared = { scope: "read" };
+		expect(() =>
+			validateCustomClaims({ first: shared, second: [shared, shared] }),
+		).not.toThrow();
+		const cyclic: Record<string, unknown> = {};
+		cyclic.self = cyclic;
+		expect(() => validateCustomClaims({ cyclic })).toThrow("cyclic");
+		const cyclicArray: unknown[] = [];
+		cyclicArray.push(cyclicArray);
+		expect(() => validateCustomClaims({ cyclicArray })).toThrow("cyclic");
+	});
+
+	test("reserves every core and registered claim name", () => {
+		for (const name of [
+			"iss",
+			"sub",
+			"aud",
+			"exp",
+			"nbf",
+			"iat",
+			"jti",
+			"fp",
+			"sid",
+			"remember",
+		]) {
+			expect(() => validateCustomClaims({ [name]: "override" })).toThrow("reserved");
+		}
+		// Reserved names are only reserved at the top level.
+		expect(() => validateCustomClaims({ nested: { sid: "x", remember: true } })).not.toThrow();
+	});
+
+	test("round-trips nested prototype-named keys through a signed token", async () => {
+		const inner = JSON.parse('{"__proto__":{"polluted":true},"constructor":"c"}') as Record<
+			string,
+			never
+		>;
+		const token = await signJwtFromParts({ ...tokenParts(), customClaims: { inner } });
+		const verified = await verifyJwt({
+			token,
+			secretConfig: TEST_SECRET,
+			issuer: TEST_BASE_URL,
+			allowCustomClaims: true,
+		});
+		expect(getCustomClaims(verified)).toEqual({ inner });
+		expect(({} as Record<string, unknown>).polluted).toBeUndefined();
 	});
 
 	test("signs with the current Better Auth secret version and verifies retained keys", async () => {
