@@ -309,6 +309,25 @@ describe("terminal SCJWT session finalizer", () => {
 		}
 	});
 
+	test("rejects requests when another plugin's init installs bearer()", async () => {
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [{ id: "installs-bearer", init: () => ({ options: { plugins: [bearer()] } }) }, scjwt()],
+		});
+		expect((await auth.$context).options.plugins?.map((plugin) => plugin.id)).toContain("bearer");
+		await expect(
+			auth.api.signUpEmail({
+				body: signUpBody("init-bearer@example.com"),
+				headers: new Headers(STABLE_HEADERS),
+			}),
+		).rejects.toThrow("[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt()");
+		expect(db.user).toHaveLength(0);
+	});
+
 	test("keeps one plugin instance isolated across auth instances", async () => {
 		const shared = scjwt({ tokenPlacement: "header" });
 		const denied = betterAuth({

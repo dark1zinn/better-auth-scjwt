@@ -55,13 +55,7 @@ export function scjwt(options: ScjwtOptions = {}): BetterAuthPlugin {
 			) {
 				throw new Error("[scjwt] register scjwt() exactly once.");
 			}
-			// bearer() turns a native session token from `Authorization` into a session
-			// cookie that SCJWT never verifies, bypassing fingerprint and claim checks.
-			if (plugins.some((plugin) => plugin.id === BEARER_PLUGIN_ID)) {
-				throw new Error(
-					'[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt(); use scjwt({ tokenPlacement: "header" }) for Authorization: Bearer transport.',
-				);
-			}
+			assertNoBearerPlugin(plugins);
 			return {
 				options: { plugins: [finalizer] } satisfies Partial<BetterAuthOptions>,
 			};
@@ -73,6 +67,9 @@ export function scjwt(options: ScjwtOptions = {}): BetterAuthPlugin {
 					handler: createAuthMiddleware(async (ctx) => {
 						const plugins = ctx.context.options.plugins ?? [];
 						if (!verifiedPluginLists.has(plugins)) {
+							// Plugins appended by other plugins' `init` only appear in the
+							// resolved list, so re-check bearer() here as well.
+							assertNoBearerPlugin(plugins);
 							assertFinalizerIsTerminal(plugins);
 							verifiedPluginLists.add(plugins);
 						}
@@ -82,6 +79,18 @@ export function scjwt(options: ScjwtOptions = {}): BetterAuthPlugin {
 			],
 		},
 	} satisfies BetterAuthPlugin;
+}
+
+/**
+ * bearer() turns a native session token from `Authorization` into a session
+ * cookie that SCJWT never verifies, bypassing fingerprint and claim checks.
+ */
+function assertNoBearerPlugin(plugins: BetterAuthPlugin[]): void {
+	if (plugins.some((plugin) => plugin.id === BEARER_PLUGIN_ID)) {
+		throw new Error(
+			'[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt(); use scjwt({ tokenPlacement: "header" }) for Authorization: Bearer transport.',
+		);
+	}
 }
 
 /**
