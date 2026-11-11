@@ -74,6 +74,24 @@ export function hasLiveSetCookie(headers: Headers | undefined, name: string): bo
 	return live;
 }
 
+/**
+ * Drops pending live native session cookies (session token, session data and
+ * its chunks, `dontRemember`) and any pending `set-auth-token`, without
+ * emitting clearing cookies, so the client keeps whatever SCJWT it already
+ * holds. Clearing instructions already in `headers` are kept.
+ */
+export function removePendingSessionTransport(
+	headers: Headers,
+	authCookies: BetterAuthCookies,
+): void {
+	const kept = getSetCookieValues(headers).filter((setCookie) => {
+		const parsed = parseSingleSetCookie(setCookie);
+		return !(parsed && isHeaderOnlyNativeCookie(parsed[0], authCookies) && isLiveCookie(parsed[1]));
+	});
+	replaceSetCookieValues(headers, kept);
+	headers.delete(SET_AUTH_TOKEN_HEADER);
+}
+
 function getSetCookieValues(headers: Headers): string[] {
 	const withGetSetCookie = headers as Headers & {
 		getSetCookie?: () => string[];

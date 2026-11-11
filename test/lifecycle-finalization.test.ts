@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import type { BetterAuthPlugin } from "better-auth";
 import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
@@ -57,11 +57,9 @@ function bearerHeaders(token: string): Headers {
 	return new Headers({ ...STABLE_HEADERS, authorization: `Bearer ${token}` });
 }
 
-/** A rejected credential (401) and an ignored one (null session) both leave the caller anonymous. */
-async function expectUnauthenticated(response: Response): Promise<void> {
-	if (response.status === 401) return;
+async function expectAuthenticatedAs(response: Response, email: string): Promise<void> {
 	expect(response.status).toBe(200);
-	expect(await response.json()).toBeNull();
+	expect(await response.json()).toMatchObject({ user: { email } });
 }
 
 describe("terminal SCJWT session finalizer", () => {
@@ -147,13 +145,14 @@ describe("terminal SCJWT session finalizer", () => {
 		});
 	});
 
-	test("issues nothing when a later hook withdraws the new session", async () => {
+	test("a withdrawn session leaves no native cookie and keeps the presented SCJWT", async () => {
 		for (const tokenPlacement of PLACEMENTS) {
 			const auth = betterAuth({
 				database: memoryAdapter(createMemoryDB()),
 				baseURL: TEST_BASE_URL,
 				secret: TEST_SECRET,
 				emailAndPassword: { enabled: true },
+				session: { cookieCache: { enabled: true } },
 				plugins: [
 					scjwt({ tokenPlacement }),
 					{
@@ -161,7 +160,7 @@ describe("terminal SCJWT session finalizer", () => {
 						hooks: {
 							after: [
 								{
-									matcher: (ctx) => ctx.path === "/sign-up/email",
+									matcher: (ctx) => ctx.path === "/sign-in/email",
 									handler: createAuthMiddleware(async (ctx) => {
 										ctx.context.setNewSession(null);
 									}),
@@ -172,23 +171,89 @@ describe("terminal SCJWT session finalizer", () => {
 				],
 			});
 			const context = await auth.$context;
+			const email = `${tokenPlacement}-withdrawn@example.com`;
+			const issued = await signUpWithScjwt(auth, email);
+			const presented = () =>
+				tokenPlacement === "cookie"
+					? createCookieHeaders(issued.cookieName, issued.token)
+					: bearerHeaders(issued.token);
+			const headers = presented();
+			headers.set("content-type", "application/json");
 			const response = await auth.handler(
-				signUpRequest(`${tokenPlacement}-withdrawn@example.com`),
+				new Request(`${TEST_BASE_URL}/api/auth/sign-in/email`, {
+					method: "POST",
+					headers,
+					body: JSON.stringify({ email, password: PASSWORD }),
+				}),
 			);
 			expect(response.status).toBe(200);
 			expect(response.headers.get("set-auth-token")).toBeNull();
-			const native = parseSetCookieHeader(response.headers.get("set-cookie") ?? "").get(
+			const cookies = parseSetCookieHeader(response.headers.get("set-cookie") ?? "");
+			// Neither a live native credential nor anything that overwrites the client's SCJWT.
+			for (const name of [
 				context.authCookies.sessionToken.name,
-			)?.value;
-			// Whatever native cookie remains is not an SCJWT and cannot authenticate.
-			expect(native?.split(".").length ?? 0).not.toBe(3);
-			if (native) {
-				const replay = await requestSession(
-					auth,
-					createCookieHeaders(context.authCookies.sessionToken.name, native),
-				);
-				await expectUnauthenticated(replay);
+				context.authCookies.sessionData.name,
+			]) {
+				expect(cookies.has(name)).toBe(false);
 			}
+			await expectAuthenticatedAs(await requestSession(auth, presented()), email);
+		}
+	});
+
+	test("a denied request that only refreshed the presented session keeps its SCJWT", async () => {
+		for (const tokenPlacement of PLACEMENTS) {
+			let deny = false;
+			const auth = betterAuth({
+				database: memoryAdapter(createMemoryDB()),
+				baseURL: TEST_BASE_URL,
+				secret: TEST_SECRET,
+				emailAndPassword: { enabled: true },
+				session: { expiresIn: 3600, updateAge: 0, cookieCache: { enabled: true } },
+				plugins: [
+					scjwt({ tokenPlacement }),
+					{
+						id: "deny-refresh",
+						hooks: {
+							after: [
+								{
+									matcher: (ctx) => ctx.path === "/get-session",
+									handler: createAuthMiddleware(async () => {
+										if (deny) throw APIError.fromStatus("FORBIDDEN");
+									}),
+								},
+							],
+						},
+					},
+				],
+			});
+			const context = await auth.$context;
+			const email = `${tokenPlacement}-denied-refresh@example.com`;
+			const issued = await signUpWithScjwt(auth, email);
+			const presented = () =>
+				tokenPlacement === "cookie"
+					? createCookieHeaders(issued.cookieName, issued.token)
+					: bearerHeaders(issued.token);
+			deny = true;
+			setSystemTime(new Date(Date.now() + 2000));
+			let denied: Response;
+			try {
+				denied = await requestSession(auth, presented());
+			} finally {
+				setSystemTime();
+			}
+			expect(denied.status).toBe(403);
+			expect(denied.headers.get("set-auth-token")).toBeNull();
+			const cookies = parseSetCookieHeader(denied.headers.get("set-cookie") ?? "");
+			// No replacement and no clearing instruction for the client's SCJWT.
+			for (const name of [
+				context.authCookies.sessionToken.name,
+				context.authCookies.sessionData.name,
+				context.authCookies.dontRememberToken.name,
+			]) {
+				expect(cookies.has(name)).toBe(false);
+			}
+			deny = false;
+			await expectAuthenticatedAs(await requestSession(auth, presented()), email);
 		}
 	});
 

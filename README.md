@@ -123,7 +123,7 @@ The configured placement is authoritative. Cookie mode ignores `Authorization`; 
 
 ## Native session lifecycle
 
-SCJWT issuance follows `ctx.context.newSession`, not a path allowlist. It therefore covers credential sign-in/sign-up, social callbacks, passwordless plugins, passkeys, impersonation, and any plugin that uses Better Auth's `setSessionCookie`, including redirects (`ctx.redirect` or a returned 3xx `Response`, whose status and `Location` are preserved). Results with status 400 or higher, whether thrown API errors or returned `Response` objects, never receive a replacement SCJWT and expire native session cookies when the request established a new session. Unrelated failures that did not establish a session leave existing cookies intact.
+SCJWT issuance follows `ctx.context.newSession`, not a path allowlist. It therefore covers credential sign-in/sign-up, social callbacks, passwordless plugins, passkeys, impersonation, and any plugin that uses Better Auth's `setSessionCookie`, including redirects (`ctx.redirect` or a returned 3xx `Response`, whose status and `Location` are preserved). Results with status 400 or higher, whether thrown API errors or returned `Response` objects, never receive a replacement SCJWT. When the failed request established a new session, its native session cookies are expired; when it only refreshed the session of the presented SCJWT, the pending replacement is dropped instead, so the client keeps its still-valid SCJWT. If a later hook withdraws the new session (`setNewSession(null)`), any live native session cookie written for it is dropped, so it neither leaks nor overwrites the client's SCJWT. Unrelated failures that did not establish a session leave existing cookies intact.
 
 Better Auth owns refresh timing:
 

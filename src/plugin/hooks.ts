@@ -3,6 +3,7 @@ import type { AuthContext, BetterAuthPlugin, Session } from "better-auth";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import { expireCookie, parseCookies } from "better-auth/cookies";
 import { serializeSignedCookie } from "better-call";
+import { decodeJwt } from "jose";
 import { computeFingerprint } from "./fingerprint";
 import {
 	getCustomClaims,
@@ -17,6 +18,7 @@ import {
 	deliverSessionToken,
 	hasLiveSetCookie,
 	isHeaderOnlyNativeCookie,
+	removePendingSessionTransport,
 	SET_AUTH_TOKEN_HEADER,
 } from "./token-deliver";
 import { extractToken } from "./token-extract";
@@ -128,6 +130,16 @@ export function createScjwtHooks(
 				handler: createAuthMiddleware(async (ctx) => {
 					const newSession = ctx.context.newSession;
 					if (!newSession) {
+						// A later hook withdrew the session (for example a pending two-factor
+						// challenge): drop the live native credential written for it so it
+						// neither leaks nor overwrites the SCJWT the client already holds.
+						const pending = ctx.context.responseHeaders;
+						if (
+							pending &&
+							hasLiveSetCookie(pending, ctx.context.authCookies.sessionToken.name)
+						) {
+							removePendingSessionTransport(pending, ctx.context.authCookies);
+						}
 						return;
 					}
 					const returned = ctx.context.returned;
@@ -135,7 +147,23 @@ export function createScjwtHooks(
 						(isAPIError(returned) && returned.statusCode >= 400) ||
 						(returned instanceof Response && returned.status >= 400)
 					) {
-						clearSessionTransport(ctx);
+						const presentedSessionId = readPresentedSessionId(
+							options,
+							ctx.context.authCookies.sessionToken.name,
+							ctx.request?.headers ?? ctx.headers,
+						);
+						if (presentedSessionId === newSession.session.id) {
+							// Only the presented session was refreshed: keep its SCJWT valid
+							// and drop the replacement instead of logging the client out.
+							if (ctx.context.responseHeaders) {
+								removePendingSessionTransport(
+									ctx.context.responseHeaders,
+									ctx.context.authCookies,
+								);
+							}
+						} else {
+							clearSessionTransport(ctx);
+						}
 						return;
 					}
 					const headers =
@@ -144,6 +172,10 @@ export function createScjwtHooks(
 						headers,
 						ctx.context.options,
 						options.fingerprintMode,
+					);
+					const remember = !hasLiveSetCookie(
+						ctx.context.responseHeaders,
+						ctx.context.authCookies.dontRememberToken.name,
 					);
 					const issuedAt = Math.floor(Date.now() / 1000);
 					const expiresAt = Math.min(
@@ -175,10 +207,7 @@ export function createScjwtHooks(
 							sessionId: newSession.session.id,
 							expiresAt,
 							issuedAt,
-							remember: !hasLiveSetCookie(
-								ctx.context.responseHeaders,
-								ctx.context.authCookies.dontRememberToken.name,
-							),
+							remember,
 							customClaims,
 						});
 					} catch (error) {
@@ -198,6 +227,34 @@ export function createScjwtHooks(
 			},
 		],
 	};
+}
+
+/**
+ * Session id of the SCJWT presented in the configured transport. The before
+ * hook has already verified it when the request reaches the after hooks.
+ */
+function readPresentedSessionId(
+	options: ResolvedScjwtOptions,
+	cookieName: string,
+	headers: Headers | undefined,
+): string | null {
+	if (!headers) {
+		return null;
+	}
+	const token = extractToken({
+		tokenPlacement: options.tokenPlacement,
+		cookieName,
+		headers,
+	});
+	if (!token) {
+		return null;
+	}
+	try {
+		const { sid } = decodeJwt(token);
+		return typeof sid === "string" ? sid : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
