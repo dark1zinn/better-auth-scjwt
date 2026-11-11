@@ -142,8 +142,10 @@ When Better Auth refreshes a native session and sets `newSession`, SCJWT is reis
 Token expiration is capped to:
 
 ```txt
-min(database session.expiresAt, issuedAt + Better Auth session.expiresIn)
+min(database session.expiresAt, issuedAt + lifetime)
 ```
+
+where `lifetime` is Better Auth `session.expiresIn` for remembered sessions and one day for `rememberMe: false` sessions, matching the fixed one-day lifetime Better Auth gives those sessions even when `expiresIn` is shorter. Verification applies the same cap.
 
 ## JWT payload and key rotation
 

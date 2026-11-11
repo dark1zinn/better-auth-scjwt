@@ -171,6 +171,46 @@ describe("rememberMe:false sessions", () => {
 		}
 	});
 
+	test("non-persistent tokens live as long as Better Auth's one-day session when expiresIn is shorter", async () => {
+		for (const placement of PLACEMENTS) {
+			const db = createMemoryDB();
+			const auth = createAuth(db, placement, { expiresIn: 3600 });
+			const email = `${placement}-short-nonpersistent@example.com`;
+			const token = await issuedToken(
+				auth,
+				await post(auth, "/sign-up/email", {
+					name: "Short",
+					email,
+					password: PASSWORD,
+					rememberMe: false,
+				}),
+			);
+			const sessionEnd = sessionExpiry(db);
+			expect(Math.abs(sessionEnd - Date.now() - DAY_MS)).toBeLessThan(60_000);
+			expect((decodeJwt(token).exp ?? 0) * 1000).toBe(Math.floor(sessionEnd / 1000) * 1000);
+			// Past expiresIn, where Better Auth's native session is still valid and never refreshed.
+			const later = await withClock(Date.now() + 2 * HOUR_MS, async () =>
+				requestSession(auth, await tokenHeaders(auth, placement, token)),
+			);
+			expect(later.status).toBe(200);
+			expect(await later.json()).toMatchObject({ user: { email } });
+		}
+	});
+
+	test("remembered tokens stay capped at expiresIn", async () => {
+		const auth = createAuth(createMemoryDB(), "header", { expiresIn: 3600 });
+		const token = await issuedToken(
+			auth,
+			await post(auth, "/sign-up/email", {
+				name: "Remembered Short",
+				email: "remembered-short@example.com",
+				password: PASSWORD,
+			}),
+		);
+		const { iat = 0, exp = 0 } = decodeJwt(token);
+		expect(exp - iat).toBe(3600);
+	});
+
 	test("a supplied dontRemember cookie cannot override the signed claim", async () => {
 		const db = createMemoryDB();
 		const auth = createAuth(db, "header", { expiresIn: 3600, updateAge: 0 });

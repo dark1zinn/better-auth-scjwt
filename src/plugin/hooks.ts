@@ -4,6 +4,7 @@ import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import { expireCookie, parseCookies } from "better-auth/cookies";
 import { serializeSignedCookie } from "better-call";
 import { decodeJwt } from "jose";
+import { NONPERSISTENT_SESSION_SECONDS } from "./constants";
 import { computeFingerprint } from "./fingerprint";
 import {
 	getCustomClaims,
@@ -77,7 +78,7 @@ export function createScjwtHooks(
 					);
 					const maximumTokenExpiry = Math.min(
 						sessionExpiresAt,
-						payload.iat + ctx.context.sessionConfig.expiresIn,
+						payload.iat + tokenLifetime(payload.remember, ctx.context),
 					);
 					if (
 						sessionExpiresAt <= Math.floor(Date.now() / 1000) ||
@@ -180,7 +181,7 @@ export function createScjwtHooks(
 					const issuedAt = Math.floor(Date.now() / 1000);
 					const expiresAt = Math.min(
 						Math.floor(new Date(newSession.session.expiresAt).getTime() / 1000),
-						issuedAt + ctx.context.sessionConfig.expiresIn,
+						issuedAt + tokenLifetime(remember, ctx.context),
 					);
 					if (expiresAt <= issuedAt) {
 						clearSessionTransport(ctx);
@@ -227,6 +228,15 @@ export function createScjwtHooks(
 			},
 		],
 	};
+}
+
+/**
+ * Longest SCJWT lifetime for a session: Better Auth's `session.expiresIn` for
+ * remembered sessions, and the fixed one-day lifetime Better Auth gives
+ * `rememberMe: false` sessions, which never refresh.
+ */
+function tokenLifetime(remember: boolean, context: AuthContext): number {
+	return remember ? context.sessionConfig.expiresIn : NONPERSISTENT_SESSION_SECONDS;
 }
 
 /**
