@@ -10,6 +10,8 @@ bun add better-auth-scjwt better-auth @better-auth/core jose
 
 Git installs (`github:dark1zinn/better-auth-scjwt#<sha>`) have no committed `dist/`. Their `prepare` script builds it during install in an isolated temporary directory, so the build's devDependencies never touch your project. Bun runs lifecycle scripts only for packages listed in `trustedDependencies`, so add `"trustedDependencies": ["better-auth-scjwt"]` to the consuming `package.json`. Packed (published) installs ship `dist/` already and skip the build.
 
+Add the trust entry before installing the Git dependency. If Bun already installed it untrusted, it skipped `prepare` and `dist/` is missing; run `bun pm trust better-auth-scjwt`, which records the trust and runs the skipped build.
+
 Supported peer ranges:
 
 - `better-auth` and `@better-auth/core`: `~1.7.18` (tested against 1.7.18; 1.8 is not yet supported)

@@ -35,7 +35,7 @@
     "test": "bun test test",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
     "test:package": "bun scripts/check-package.ts",
-    "test:git": "bun scripts/check-package.ts",
+    "test:git": "bun scripts/check-package.ts --git",
     "prepare": "bun scripts/prepare-git.ts",
     "prepack": "bun run build"
   },

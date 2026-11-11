@@ -13,7 +13,8 @@
  * must import without build tools.
  *
  * Usage: bun run test:package
- *        bun run test:git --dependency <specifier>
+ *        bun run test:git --dependency <specifier>   (`test:git` passes `--git`, which
+ *        makes `--dependency` mandatory so it never falls back to packed mode)
  */
 import { $ } from "bun";
 import { access, cp, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
@@ -65,10 +66,19 @@ async function exists(path: string): Promise<boolean> {
 	}
 }
 
-function parseDependency(argv: string[]): string | undefined {
+interface Options {
+	dependency: string | undefined;
+}
+
+function parseOptions(argv: string[]): Options {
 	let dependency: string | undefined;
+	let requireDependency = false;
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
+		if (arg === "--git") {
+			requireDependency = true;
+			continue;
+		}
 		if (arg !== "--dependency") {
 			throw new Error(`[check-package] unknown argument: ${arg}`);
 		}
@@ -79,7 +89,34 @@ function parseDependency(argv: string[]): string | undefined {
 		dependency = value;
 		index++;
 	}
-	return dependency;
+	if (requireDependency && dependency === undefined) {
+		throw new Error("[check-package] test:git requires --dependency <specifier>");
+	}
+	return { dependency };
+}
+
+// Bun's isolated linker keeps packages in `node_modules/.bun/<name>@<version>…` and links
+// them into each workspace, so a package can be installed without a top-level entry.
+async function installedPackages(workspaceRoot: string, names: string[]): Promise<string[]> {
+	const found = new Set<string>();
+	for (const dir of [join(workspaceRoot, "node_modules"), join(workspaceRoot, "server/node_modules")]) {
+		for (const name of names) {
+			if (await exists(join(dir, name))) {
+				found.add(name);
+			}
+		}
+	}
+	const store = join(workspaceRoot, "node_modules/.bun");
+	if (await exists(store)) {
+		for (const entry of await readdir(store)) {
+			for (const name of names) {
+				if (entry.startsWith(`${name}@`)) {
+					found.add(name);
+				}
+			}
+		}
+	}
+	return [...found];
 }
 
 const rootPackage = await readPackage(join(root, "package.json"));
@@ -246,10 +283,9 @@ async function checkGitDependency(specifier: string, temp: string): Promise<void
 	const server = join(production, "server");
 	await $`bun -e ${IMPORT_CHECK}`.cwd(server);
 	await $`node --input-type=module -e ${IMPORT_CHECK}`.cwd(server);
-	for (const devOnly of ["typescript", "tsdown"]) {
-		if (await exists(join(production, "node_modules", devOnly))) {
-			throw new Error(`[check-package] production install contains ${devOnly}`);
-		}
+	const buildTools = await installedPackages(production, ["typescript", "tsdown"]);
+	if (buildTools.length > 0) {
+		throw new Error(`[check-package] production install contains ${buildTools.join(", ")}`);
 	}
 	console.log("[check-package] production-filtered workspace imports ok");
 
@@ -259,7 +295,7 @@ async function checkGitDependency(specifier: string, temp: string): Promise<void
 	console.log(`[check-package] git dependency ${specifier} verified`);
 }
 
-const dependency = parseDependency(process.argv.slice(2));
+const { dependency } = parseOptions(process.argv.slice(2));
 const temp = await mkdtemp(join(tmpdir(), "scjwt-package-"));
 
 try {
