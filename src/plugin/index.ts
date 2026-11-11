@@ -18,6 +18,10 @@ declare module "@better-auth/core" {
 	}
 }
 
+/**
+ * Better Auth plugin that replaces the client-visible session token with a
+ * Session-Centric JWT while Better Auth's session store stays authoritative.
+ */
 export function scjwt(options: ScjwtOptions = {}): BetterAuthPlugin {
 	const resolved = resolveOptions(options);
 	const { before = [], after = [] } = createScjwtHooks(resolved);
@@ -115,6 +119,7 @@ function assertFinalizerIsTerminal(plugins: BetterAuthPlugin[]): void {
 	}
 }
 
+/** Applies defaults to the plugin options and rejects unsupported values. */
 function resolveOptions(options: ScjwtOptions): ResolvedScjwtOptions {
 	const tokenPlacement = options.tokenPlacement ?? DEFAULT_TOKEN_PLACEMENT;
 	if (tokenPlacement !== "cookie" && tokenPlacement !== "header") {

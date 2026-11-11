@@ -35,7 +35,12 @@ Severity reflects impact on authentication under the stated condition, not gener
 | 16 | Root tests were not type-checked; doing so exposed a transport test that signed a token from an unrelated empty database and so proved nothing | Test suite | Test gap | Fixed: `tsconfig.test.json`, `typecheck` scripts, checked row access | `b7237a1` |
 | 17 | No CI | Repository | Process | Fixed: pinned, read-only workflow running the commands above per job and per E2E profile | `74a8839` |
 | 18 | The development shell lacked Node.js, required by Node-based tooling and the packed-consumer check | Development | Low | Fixed: `nodejs_24` in the flake | `cec0a18` |
-| 19 | With Better Auth's `bearer()` registered next to `scjwt()` in cookie placement, the native session token from a sign-up or sign-in response body authenticated as `Authorization: Bearer` (`200` with the user), because `bearer()` turns it into a native session cookie that SCJWT never sees, skipping fingerprint and custom-claim checks. Header placement rejected it (`401`) | `bearer()` registered alongside `scjwt()` | High (conditional) | Fixed: initialization fails when `bearer()` is registered, in either order; header placement replaces it. Breaking for such configurations | `fix(security)!: reject the Better Auth bearer plugin alongside scjwt` |
+| 19 | With Better Auth's `bearer()` registered next to `scjwt()` in cookie placement, the native session token from a sign-up or sign-in response body authenticated as `Authorization: Bearer` (`200` with the user), because `bearer()` turns it into a native session cookie that SCJWT never sees, skipping fingerprint and custom-claim checks. Header placement rejected it (`401`) | `bearer()` registered alongside `scjwt()` | High (conditional) | Fixed: initialization fails when `bearer()` is registered, in either order; header placement replaces it. Breaking for such configurations | `23bafff` |
+| 20 | `bearer()` appended by another plugin's `init` only appears in the resolved plugin list, so the startup check missed it | A plugin whose `init` installs `bearer()` | High (conditional) | Fixed: the per-request plugin-list check also rejects `bearer()` | `324468c` |
+| 21 | A request that only refreshed the presented session and then failed expired the client's still-valid SCJWT; a session withdrawn by a later hook (`setNewSession(null)`) left a live native cookie that overwrote the SCJWT (cookie placement) or leaked a native credential (header placement) | Later hooks denying a refresh or withdrawing a session | Medium | Fixed: refresh-only failures and withdrawals drop the pending native cookies without clearing the client's SCJWT; failures that created a new session still expire it | `98459d6` |
+| 22 | `rememberMe: false` tokens were capped at `session.expiresIn`, although Better Auth gives those sessions a fixed one-day lifetime and never refreshes them, so a shorter `expiresIn` logged users out early | `session.expiresIn` below one day | Medium | Fixed: issuance and verification cap non-persistent tokens at one day | `9140e9d` |
+| 23 | The tampered-signature test changed only the final base64url character, whose low bits are unused for a 32-byte HMAC, so it failed intermittently | Test suite | Test gap | Fixed: the test flips a significant character | `2b3305b` |
+| 24 | `auth:migrate` and `start:dev` in the example could load a missing or stale `dist` because installing no longer builds | Example | Low | Fixed: `preauth:migrate` and `prestart:dev` run `sync:scjwt` | `ee648e2` |
 
 ## Reviewed and not treated as defects
 
@@ -62,7 +67,7 @@ Results from the final branch state:
 | Check | Result |
 |---|---|
 | `bun run typecheck` (src; src + test + scripts) | pass |
-| `bun test` | 117 tests across 11 files pass |
+| `bun test` | 121 tests across 11 files pass |
 | `bun run test:package` | Node.js 24.20.0 and Bun 1.4.2 runtime imports pass; `bundler` and `NodeNext` consumer type checks pass with `skipLibCheck` off; 14 packed files verified |
 | `bun run --cwd examples/nestjs typecheck` / `test` / `build` | pass / 1 test pass / pass |
 | `bun run --cwd examples/nestjs test:e2e` | 9 profiles, 51 tests pass |

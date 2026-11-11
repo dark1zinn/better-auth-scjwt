@@ -320,6 +320,7 @@ async function signRequestCookieValue(value: string, secret: string): Promise<st
 	}
 }
 
+/** Serializes request cookies into a `Cookie` header value. */
 function serializeRequestCookies(cookies: Map<string, string>): string {
 	return [...cookies]
 		.map(([name, value]) => `${name}=${encodeURIComponent(value)}`)
@@ -341,6 +342,11 @@ function clearSessionTransport(
 	ctx.context.responseHeaders?.delete(SET_AUTH_TOKEN_HEADER);
 }
 
+/**
+ * In header placement, removes native session cookies from a request without
+ * an SCJWT so a stray browser cookie cannot authenticate. Returns `null` when
+ * nothing was removed.
+ */
 function stripNativeSessionCookies(
 	sourceHeaders: Headers,
 	authCookies: AuthContext["authCookies"],
@@ -365,6 +371,7 @@ function stripNativeSessionCookies(
 	return headers;
 }
 
+/** Verifies the presented SCJWT, mapping any failure to a generic `401`. */
 async function verifyRequestToken(
 	context: AuthContext,
 	token: string,
@@ -382,6 +389,7 @@ async function verifyRequestToken(
 	}
 }
 
+/** Runs the configured custom-claims resolver and validates its result. */
 async function resolveCustomClaims(
 	options: ResolvedScjwtOptions,
 	context: ScjwtClaimContext,
@@ -416,6 +424,7 @@ async function resolveAuthoritativeSession(
 	return { ...resolved, nativeToken: candidate.token };
 }
 
+/** Throws Better Auth's standard `401 UNAUTHORIZED` error. */
 function unauthorized(): never {
 	throw APIError.fromStatus("UNAUTHORIZED");
 }

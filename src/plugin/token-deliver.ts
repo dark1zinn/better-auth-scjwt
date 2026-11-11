@@ -10,6 +10,11 @@ import type { TokenPlacement } from "./types";
 
 export const SET_AUTH_TOKEN_HEADER = "set-auth-token";
 
+/**
+ * Places the SCJWT in the configured transport: cookie placement replaces the
+ * live native session-token cookie; header placement sets `set-auth-token`
+ * and removes live native session cookies.
+ */
 export function deliverSessionToken(
 	headers: Headers,
 	token: string,
@@ -92,6 +97,7 @@ export function removePendingSessionTransport(
 	headers.delete(SET_AUTH_TOKEN_HEADER);
 }
 
+/** All `Set-Cookie` values, with a fallback for runtimes lacking `getSetCookie`. */
 function getSetCookieValues(headers: Headers): string[] {
 	const withGetSetCookie = headers as Headers & {
 		getSetCookie?: () => string[];
@@ -100,6 +106,7 @@ function getSetCookieValues(headers: Headers): string[] {
 		splitSetCookieHeader(headers.get("set-cookie") ?? "");
 }
 
+/** Replaces every `Set-Cookie` value in `headers`. */
 function replaceSetCookieValues(headers: Headers, values: string[]): void {
 	headers.delete("set-cookie");
 	for (const value of values) {
@@ -107,6 +114,7 @@ function replaceSetCookieValues(headers: Headers, values: string[]): void {
 	}
 }
 
+/** Parses one `Set-Cookie` value into its name and attributes. */
 function parseSingleSetCookie(
 	setCookie: string,
 ): [string, CookieAttributes] | null {
@@ -133,6 +141,7 @@ function isLiveCookie(attributes: {
 	return !attributes.expires || attributes.expires.getTime() > Date.now();
 }
 
+/** Whether `name` is a native cookie that header placement must not deliver. */
 export function isHeaderOnlyNativeCookie(
 	name: string,
 	authCookies: BetterAuthCookies,
@@ -145,6 +154,7 @@ export function isHeaderOnlyNativeCookie(
 	);
 }
 
+/** Adds `headerName` to `Access-Control-Expose-Headers` exactly once. */
 function exposeHeader(headers: Headers, headerName: string): void {
 	const exposed = new Map<string, string>();
 	for (const value of (headers.get("access-control-expose-headers") ?? "").split(",")) {
