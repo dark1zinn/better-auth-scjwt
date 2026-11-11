@@ -115,7 +115,9 @@ describe("SCJWT rejection boundaries", () => {
 		await expectAuthenticated(auth, await forge(claims), email);
 
 		const [header, payload, signature] = control.split(".");
-		const flipped = `${signature?.slice(0, -1)}${signature?.endsWith("A") ? "B" : "A"}`;
+		// Flip a leading character: the final base64url character of a 32-byte HMAC has
+		// unused low bits, so changing it may leave the decoded signature unchanged.
+		const flipped = `${signature?.startsWith("A") ? "B" : "A"}${signature?.slice(1)}`;
 		const otherPayload = Buffer.from(
 			JSON.stringify({ ...claims, sid: "attacker-chosen" }),
 		).toString("base64url");
