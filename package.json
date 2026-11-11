@@ -14,6 +14,7 @@
   ],
   "files": [
     "dist",
+    "scripts/prepare-git.ts",
     "README.md",
     "LICENSE"
   ],
@@ -34,6 +35,8 @@
     "test": "bun test test",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
     "test:package": "bun scripts/check-package.ts",
+    "test:git": "bun scripts/check-package.ts",
+    "prepare": "bun scripts/prepare-git.ts",
     "prepack": "bun run build"
   },
   "author": "dark1zinn",
