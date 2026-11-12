@@ -12,6 +12,10 @@ Git installs (`github:dark1zinn/better-auth-scjwt#<sha>`) have no committed `dis
 
 Add the trust entry before installing the Git dependency. If Bun already installed it untrusted, it skipped `prepare` and `dist/` is missing; run `bun pm trust better-auth-scjwt`, which records the trust and runs the skipped build.
 
+Trusting the Git dependency means its build toolchain (tsdown, rolldown, TypeScript, and their dependencies, resolved from this repository's `bun.lock` rather than yours) runs during your install. To limit what that code can read, the nested install and build receive an allowlisted environment instead of yours: tool paths, `HOME`, temp, locale, and `BUN_INSTALL*` cache settings for both steps, plus registry, proxy, and CA settings (`NPM_CONFIG_REGISTRY`/`BUN_CONFIG_REGISTRY`, `HTTP(S)_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `NPM_CONFIG_CAFILE`, `NPM_CONFIG_USERCONFIG`) for the install step only. CI tokens, cloud credentials, `SSH_AUTH_SOCK`, and registry tokens in environment variables are withheld. The allowlist does not hide files: the build can still read anything your user can, such as `~/.npmrc`. Pin the dependency to a commit SHA you have reviewed.
+
+The toolchain comes from the public npm registry, so no registry credentials are needed. If your registry mirror requires a token supplied through an environment variable (for example `//registry.example.com/:_authToken=${NPM_TOKEN}` in `.npmrc`), name it explicitly: `SCJWT_PREPARE_FORWARD_ENV=NPM_TOKEN bun install`. Comma-separate several names. Forwarded variables reach the nested install only, never the build step.
+
 Supported peer ranges:
 
 - `better-auth` and `@better-auth/core`: `~1.7.18` (tested against 1.7.18; 1.8 is not yet supported)

@@ -45,8 +45,46 @@ const SOURCE_DIR = "src";
 
 const EXCLUDED_NAME = /^(node_modules|\.git|\.env(\..*)?)$/;
 
-const STRIPPED_ENV =
-	/^npm_config_(production|omit|include|dev|only|optional|ignore_scripts|frozen_lockfile)$/i;
+/**
+ * Variables both nested steps get: locating tools, temp and cache dirs, locale,
+ * and output formatting. Everything else in the consumer's install environment
+ * (CI tokens, cloud credentials, `SSH_AUTH_SOCK`, …) is withheld, because the
+ * build runs this repository's toolchain, resolved from this repository's lockfile.
+ */
+const BASE_ENV = [
+	/^PATH$/i,
+	/^PATHEXT$/i,
+	/^HOME$/i,
+	/^USERPROFILE$/i,
+	/^(TMPDIR|TEMP|TMP)$/i,
+	/^(SYSTEMROOT|WINDIR|COMSPEC)$/i,
+	/^LANG$/,
+	/^LC_[A-Z]+$/,
+	/^(NO_COLOR|FORCE_COLOR)$/,
+	/^BUN_INSTALL(_[A-Z_]+)?$/,
+	/^BUN_RUNTIME_TRANSPILER_CACHE_PATH$/,
+] as const;
+
+/**
+ * Extra variables the nested install needs to fetch the toolchain: registry
+ * location, proxies, CA bundles, and where `.npmrc` lives. Registry tokens are
+ * deliberately absent; see {@link FORWARD_ENV_VARIABLE}.
+ */
+const INSTALL_ENV = [
+	/^(NPM|BUN)_CONFIG_REGISTRY$/i,
+	/^(HTTP_PROXY|HTTPS_PROXY|NO_PROXY)$/i,
+	/^(SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|NODE_USE_SYSTEM_CA)$/,
+	/^NPM_CONFIG_(CAFILE|USERCONFIG)$/i,
+	/^XDG_CONFIG_HOME$/,
+	/^BUN_CONFIG_MAX_HTTP_REQUESTS$/,
+] as const;
+
+/**
+ * Comma-separated variable names the consumer explicitly forwards to the
+ * nested install, for example a registry token referenced from `.npmrc`. They
+ * never reach the build step.
+ */
+export const FORWARD_ENV_VARIABLE = "SCJWT_PREPARE_FORWARD_ENV";
 
 async function exists(path: string): Promise<boolean> {
 	try {
@@ -67,10 +105,14 @@ async function missingEntrypoints(root: string): Promise<string[]> {
 	return missing;
 }
 
-function childEnv(): Record<string, string> {
+function allowlisted(
+	source: Record<string, string | undefined>,
+	patterns: readonly RegExp[],
+	extraNames: ReadonlySet<string> = new Set(),
+): Record<string, string> {
 	const env: Record<string, string> = {};
-	for (const [key, value] of Object.entries(process.env)) {
-		if (value !== undefined && !STRIPPED_ENV.test(key)) {
+	for (const [key, value] of Object.entries(source)) {
+		if (value !== undefined && (extraNames.has(key) || patterns.some((pattern) => pattern.test(key)))) {
 			env[key] = value;
 		}
 	}
@@ -78,10 +120,30 @@ function childEnv(): Record<string, string> {
 	return env;
 }
 
-async function run(args: readonly string[], cwd: string): Promise<void> {
+/** Environment for the nested `bun install`: base, network settings, and explicit opt-ins. */
+export function installEnv(source: Record<string, string | undefined>): Record<string, string> {
+	const forwarded = new Set(
+		(source[FORWARD_ENV_VARIABLE] ?? "")
+			.split(",")
+			.map((name) => name.trim())
+			.filter(Boolean),
+	);
+	return allowlisted(source, [...BASE_ENV, ...INSTALL_ENV], forwarded);
+}
+
+/** Environment for the nested `bun run build`: the base allowlist only, no network or credentials. */
+export function buildEnv(source: Record<string, string | undefined>): Record<string, string> {
+	return allowlisted(source, BASE_ENV);
+}
+
+async function run(
+	args: readonly string[],
+	cwd: string,
+	env: Record<string, string>,
+): Promise<void> {
 	const proc = Bun.spawn([process.execPath, ...args], {
 		cwd,
-		env: childEnv(),
+		env,
 		stdin: "ignore",
 		stdout: "inherit",
 		stderr: "inherit",
@@ -117,8 +179,8 @@ async function main(): Promise<void> {
 	const temp = await mkdtemp(join(tmpdir(), "better-auth-scjwt-build-"));
 	try {
 		await stageSource(temp);
-		await run(INSTALL_ARGS, temp);
-		await run(BUILD_ARGS, temp);
+		await run(INSTALL_ARGS, temp, installEnv(process.env));
+		await run(BUILD_ARGS, temp, buildEnv(process.env));
 
 		const missing = await missingEntrypoints(temp);
 		if (missing.length > 0) {
@@ -132,8 +194,10 @@ async function main(): Promise<void> {
 	}
 }
 
-main().catch((error: unknown) => {
-	const message = error instanceof Error ? error.message : String(error);
-	console.error(`[prepare-git] ${message}`);
-	process.exit(1);
-});
+if (import.meta.main) {
+	main().catch((error: unknown) => {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`[prepare-git] ${message}`);
+		process.exit(1);
+	});
+}
