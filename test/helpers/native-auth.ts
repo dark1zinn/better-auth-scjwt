@@ -3,7 +3,11 @@ import type { AuthContext, Session } from "better-auth";
 import type { MemoryDB } from "better-auth/adapters/memory";
 import { parseSetCookieHeader } from "better-auth/cookies";
 import { computeFingerprint } from "../../src/plugin/fingerprint";
-import { signJwtFromParts, type ScjwtSecretConfig } from "../../src/plugin/jwt";
+import {
+	getSigningSecret,
+	signJwtFromParts,
+	type ScjwtSecretConfig,
+} from "../../src/plugin/jwt";
 import { getRequestFingerprintInput } from "../../src/plugin/request-context";
 import type { FingerprintMode } from "../../src/plugin/types";
 
@@ -131,7 +135,10 @@ export async function mintScjwt(
 		secretConfig: context.secretConfig,
 		issuer: context.baseURL,
 		userId: session.userId,
-		fingerprint: await computeFingerprint(input.ip, input.ua, input.platform),
+		fingerprint: await computeFingerprint(
+			getSigningSecret(context.secretConfig).secret,
+			input,
+		),
 		sessionId: session.id,
 		expiresAt: Math.min(
 			Math.floor(new Date(session.expiresAt).getTime() / 1000),

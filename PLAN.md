@@ -75,12 +75,15 @@ Required claims:
 {
   "iss": "<resolved Better Auth auth base URL>",
   "sub": "user:<user id>",
-  "fp": "<64 lowercase SHA-256 hex characters>",
+  "fp": { "ip": "<32 hex>", "ua": "<32 hex>", "pf": "<32 hex>" },
   "iat": 0,
   "exp": 0,
-  "sid": "<session row id>"
+  "sid": "<session row id>",
+  "remember": true
 }
 ```
+
+Each `fp` digest is HMAC-SHA-256, keyed with the token's signing secret, over `better-auth-scjwt/fingerprint/v1\0<name>\0<value>` (names `ip`, `ua`, `pf`), truncated to 16 bytes and lowercase-hex encoded. The NUL separators keep these inputs disjoint from JWT signing input, and the truncation means a digest can never stand in for a full HMAC signature (a JWT or a Better Auth signed cookie) under the same secret.
 
 Optional resolver claims are limited to 16 top-level keys, 1024 UTF-8 JSON bytes, and eight nested containers. Registered JWT names and `fp`/`sid` are reserved. Non-finite numbers, non-JSON primitives, cycles, and class instances are rejected.
 
@@ -98,7 +101,7 @@ Cookie placement retains native cache/account cookies. Header placement removes 
 
 ## Runtime compatibility
 
-Fingerprint hashing uses `globalThis.crypto.subtle.digest`. Runtime code has no `node:crypto` dependency and remains compatible with Fetch-based Node, Bun, Deno, Worker, and framework adapter environments supported by Better Auth.
+Fingerprint digests use Web Crypto HMAC (`globalThis.crypto.subtle`). Runtime code has no `node:crypto` dependency and remains compatible with Fetch-based Node, Bun, Deno, Worker, and framework adapter environments supported by Better Auth.
 
 ## Verification gates
 

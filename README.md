@@ -163,12 +163,14 @@ The core payload is:
 |---|---|
 | `iss` | Resolved Better Auth authentication base URL. |
 | `sub` | `user:{session.userId}`. |
-| `fp` | Lowercase SHA-256 fingerprint. |
+| `fp` | Keyed device-signal digests `{ ip, ua, pf }`: 32 lowercase hex characters each, an HMAC-SHA-256 under the signing secret truncated to 128 bits. |
 | `iat`, `exp` | Unix issuance and effective-expiry seconds. |
 | `sid` | Canonical Better Auth session-row ID. |
 | `remember` | `false` when Better Auth created the session with `rememberMe: false`; otherwise `true`. |
 
 `remember` carries Better Auth's non-persistent session policy without a client cookie. At issuance it mirrors the native `dontRemember` marker that `setSessionCookie` writes; on each request SCJWT discards any caller-supplied `dontRemember` cookie and reconstructs the signed marker only when `remember` is `false`. Better Auth then skips refresh exactly as it would for a native `rememberMe: false` session, so such sessions keep their one-day lifetime in both placements, and replacement tokens (for example from `/update-session`) inherit the policy. In cookie placement the SCJWT cookie of a non-persistent session is a browser-session cookie; header clients decide how long they keep their own Bearer token.
+
+`fp` keeps one digest per signal so a change can be attributed to the IP, the User-Agent, or the platform. The digests are keyed: a token holder cannot read the client IP out of `fp` or confirm a guessed value without the secret. They are computed with the secret that signed the token (its `kid`), so rotating Better Auth's secret never looks like a device change.
 
 With a single Better Auth `secret`, SCJWT signs directly with that secret. With Better Auth `secrets`, new tokens carry the current secret version as `kid`; verification accepts current and retained versions.
 
@@ -218,6 +220,10 @@ The fingerprint constrains replay; it is not proof of device possession. User-Ag
 - Revocation audit: [`docs/REVOKE_AUDIT.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/REVOKE_AUDIT.md). Security review and known limitations: [`docs/SECURITY_REVIEW.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/SECURITY_REVIEW.md).
 
 ## Migration
+
+### Tokens issued before keyed fingerprints
+
+`fp` changed from one unkeyed SHA-256 string to keyed per-signal digests. Tokens with the old shape are rejected; requests carrying them are signed out, and users sign in again. No database migration is involved.
 
 ### Invalid tokens are signed out instead of returning `401`
 

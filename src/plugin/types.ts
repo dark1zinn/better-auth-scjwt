@@ -31,10 +31,20 @@ export interface ResolvedScjwtOptions {
 	getCustomClaims?: ScjwtOptions["getCustomClaims"];
 }
 
+/**
+ * Keyed device-signal digests carried in the `fp` claim: 32 lowercase hex
+ * characters each, for the IP, User-Agent, and platform.
+ */
+export type ScjwtFingerprint = {
+	ip: string;
+	ua: string;
+	pf: string;
+};
+
 export interface ScjwtJwtPayload {
 	iss: string;
 	sub: string;
-	fp: string;
+	fp: ScjwtFingerprint;
 	iat: number;
 	exp: number;
 	sid: string;

@@ -3,6 +3,7 @@ export type {
 	FingerprintMode,
 	JsonValue,
 	ScjwtClaimContext,
+	ScjwtFingerprint,
 	ScjwtJwtPayload,
 	ScjwtOptions,
 	TokenPlacement,

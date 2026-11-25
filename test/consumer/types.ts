@@ -7,6 +7,7 @@ import {
 	scjwt,
 	type FingerprintMode,
 	type JsonValue,
+	type ScjwtFingerprint,
 	type ScjwtJwtPayload,
 	type ScjwtOptions,
 	type TokenPlacement,
@@ -49,6 +50,8 @@ export async function registeredPlugin() {
 declare const payload: ScjwtJwtPayload;
 export const remember: boolean = payload.remember;
 export const sid: string = payload.sid;
+export const fingerprint: ScjwtFingerprint = payload.fp;
+export const userAgentDigest: string = payload.fp.ua;
 
 export const client = createAuthClient({ plugins: [scjwtClient()] });
 const clientId: "scjwt" = scjwtClient().id;

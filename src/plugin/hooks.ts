@@ -7,6 +7,8 @@ import { NONPERSISTENT_SESSION_SECONDS } from "./constants";
 import { computeFingerprint } from "./fingerprint";
 import {
 	getCustomClaims,
+	getSigningSecret,
+	getVerificationSecret,
 	jsonValuesEqual,
 	signJwtFromParts,
 	validateCustomClaims,
@@ -197,9 +199,8 @@ export function createScjwtHooks(
 							issuer: ctx.context.baseURL,
 							userId: newSession.session.userId,
 							fingerprint: await computeFingerprint(
-								input.ip,
-								input.ua,
-								input.platform,
+								getSigningSecret(ctx.context.secretConfig).secret,
+								input,
 							),
 							sessionId: newSession.session.id,
 							expiresAt,
@@ -275,17 +276,17 @@ async function authenticateToken(
 		return null;
 	}
 
-	const requestFingerprint = getRequestFingerprintInput(
-		headers,
-		context.options,
-		options.fingerprintMode,
+	// Digests are keyed with the secret that signed the token, so rotating
+	// Better Auth's secret never looks like a device change.
+	const current = await computeFingerprint(
+		getVerificationSecret(context.secretConfig, token),
+		getRequestFingerprintInput(headers, context.options, options.fingerprintMode),
 	);
-	const expectedFingerprint = await computeFingerprint(
-		requestFingerprint.ip,
-		requestFingerprint.ua,
-		requestFingerprint.platform,
-	);
-	if (payload.fp !== expectedFingerprint) {
+	const fingerprintMatches =
+		payload.fp.ip === current.ip &&
+		(options.fingerprintMode === "ip-only" ||
+			(payload.fp.ua === current.ua && payload.fp.pf === current.pf));
+	if (!fingerprintMatches) {
 		return null;
 	}
 

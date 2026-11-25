@@ -5,9 +5,12 @@ import {
 	SignJWT,
 	type JWTPayload,
 } from "jose";
-import type { JsonValue, ScjwtJwtPayload } from "./types";
+import type { JsonValue, ScjwtFingerprint, ScjwtJwtPayload } from "./types";
 
-const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/;
+const FINGERPRINT_DIGEST_PATTERN = /^[a-f0-9]{32}$/;
+const FINGERPRINT_KEYS = ["ip", "ua", "pf"] as const;
+const FINGERPRINT_SHAPE_ERROR =
+	"[scjwt] JWT payload fp must hold 32-character lowercase hex ip, ua and pf digests.";
 const MAX_CUSTOM_CLAIMS = 16;
 const MAX_CUSTOM_CLAIMS_BYTES = 1024;
 const MAX_JSON_CONTAINER_DEPTH = 8;
@@ -40,7 +43,7 @@ export interface VerifyJwtParams {
 export interface BuildJwtPayloadParams {
 	issuer: string;
 	userId: string;
-	fingerprint: string;
+	fingerprint: ScjwtFingerprint;
 	sessionId: string;
 	expiresAt: number;
 	/** `false` for Better Auth `rememberMe: false` sessions, which must not slide. */
@@ -139,7 +142,7 @@ export function parseJwtPayload(
 	const parsed: ScjwtJwtPayload = {
 		iss: readStringClaim(payload, "iss"),
 		sub: readStringClaim(payload, "sub"),
-		fp: readStringClaim(payload, "fp"),
+		fp: readFingerprintClaim(payload),
 		iat: readIntegerClaim(payload, "iat"),
 		exp: readIntegerClaim(payload, "exp"),
 		sid: readStringClaim(payload, "sid"),
@@ -271,7 +274,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** Current signing secret and its `kid` for versioned Better Auth secrets. */
-function getSigningSecret(config: ScjwtSecretConfig): {
+export function getSigningSecret(config: ScjwtSecretConfig): {
 	secret: string;
 	kid?: string;
 } {
@@ -286,7 +289,7 @@ function getSigningSecret(config: ScjwtSecretConfig): {
 }
 
 /** Selects the verification secret from the token's `kid` without trial decryption. */
-function getVerificationSecret(
+export function getVerificationSecret(
 	config: ScjwtSecretConfig,
 	token: string,
 ): string {
@@ -334,6 +337,29 @@ function readIntegerClaim(payload: JWTPayload, claim: string): number {
 	return value;
 }
 
+/** Reads the `fp` claim into a fresh object, rejecting any other shape. */
+function readFingerprintClaim(payload: JWTPayload): ScjwtFingerprint {
+	const value = payload.fp;
+	if (!isFingerprint(value)) {
+		throw new Error(FINGERPRINT_SHAPE_ERROR);
+	}
+	return { ip: value.ip, ua: value.ua, pf: value.pf };
+}
+
+/** Whether `value` is a plain object holding exactly the three hex digests. */
+function isFingerprint(value: unknown): value is ScjwtFingerprint {
+	return (
+		isPlainObject(value) &&
+		Object.keys(value).length === FINGERPRINT_KEYS.length &&
+		FINGERPRINT_KEYS.every(
+			(key) =>
+				Object.hasOwn(value, key) &&
+				typeof value[key] === "string" &&
+				FINGERPRINT_DIGEST_PATTERN.test(value[key]),
+		)
+	);
+}
+
 /** Validates the core claims shared by signing and verification. */
 function assertValidCorePayload(payload: ScjwtJwtPayload): void {
 	if (!payload.iss.trim()) {
@@ -342,10 +368,8 @@ function assertValidCorePayload(payload: ScjwtJwtPayload): void {
 	if (!payload.sub.startsWith("user:") || payload.sub.length === 5) {
 		throw new Error('[scjwt] JWT payload sub must match "user:{userId}".');
 	}
-	if (!FINGERPRINT_PATTERN.test(payload.fp)) {
-		throw new Error(
-			"[scjwt] JWT payload fp must be a 64-character lowercase hex SHA-256 digest.",
-		);
+	if (!isFingerprint(payload.fp)) {
+		throw new Error(FINGERPRINT_SHAPE_ERROR);
 	}
 	if (
 		!Number.isInteger(payload.iat) ||

@@ -1,7 +1,8 @@
 import { getIP } from "better-auth/api";
 import type { FingerprintMode } from "./types";
 
-export interface RequestFingerprintInput {
+/** Raw device signals a fingerprint is computed from. */
+export interface FingerprintSignals {
 	ip: string;
 	ua: string;
 	platform: string;
@@ -12,7 +13,7 @@ export function getRequestFingerprintInput(
 	headers: Headers,
 	options: Parameters<typeof getIP>[1],
 	mode: FingerprintMode,
-): RequestFingerprintInput {
+): FingerprintSignals {
 	const ip = getIP(headers, options) ?? "";
 	if (mode === "ip-only") {
 		return { ip, ua: "", platform: "" };
