@@ -2,7 +2,7 @@
 
 This review covers `better-auth-scjwt` as a replacement for Better Auth's native session transport: token cryptography, the Better Auth hook and session lifecycle, revocation, transport and CSRF boundaries, fingerprints, packaging, and the development and CI setup. Each finding below was reproduced against real Better Auth endpoints (memory adapter, `auth.handler` or `auth.api`) or read from the installed 1.7.18 source before it was changed, and each fix or coverage gap landed as its own conventional commit with its tests and documentation.
 
-Baseline: `975c1c4` (merged to `main` as `b8a09c8`). Target: `better-auth`/`@better-auth/core` 1.7.18, `jose` 6.2.12, Bun 1.4.2, Node.js 24.
+Baseline: `975c1c4` (merged to `main` as `b8a09c8`). Findings 25–28 come from a follow-up review of `main` at `2ee5c02`. Target: `better-auth`/`@better-auth/core` 1.7.18, `jose` 6.2.12, Bun 1.4.2, Node.js 24.
 
 ## Sources
 
@@ -41,6 +41,10 @@ Severity reflects impact on authentication under the stated condition, not gener
 | 22 | `rememberMe: false` tokens were capped at `session.expiresIn`, although Better Auth gives those sessions a fixed one-day lifetime and never refreshes them, so a shorter `expiresIn` logged users out early | `session.expiresIn` below one day | Medium | Fixed: issuance and verification cap non-persistent tokens at one day | `9140e9d` |
 | 23 | The tampered-signature test changed only the final base64url character, whose low bits are unused for a 32-byte HMAC, so it failed intermittently | Test suite | Test gap | Fixed: the test flips a significant character | `2b3305b` |
 | 24 | `auth:migrate` and `start:dev` in the example could load a missing or stale `dist` because installing no longer builds | Example | Low | Fixed: `preauth:migrate` and `prestart:dev` run `sync:scjwt` | `ee648e2` |
+| 25 | A presented SCJWT that failed any check made every endpoint answer `401`, including sign-in and sign-out, and the HttpOnly cookie was never cleared. A revoked token or a changed device locked the browser out until the cookie expired (reproduced: sign-in with a mismatched token returned `401`) | Any invalid, revoked, or mismatched SCJWT | Medium (availability) | Fixed: the token and native session cookies are removed and the request continues signed out; cookie placement clears the stale cookie; session-required endpoints still answer `401`. The example's `APIError` filter became unnecessary and was removed. Breaking for clients that relied on `401` from `/get-session` | `79c82cb` |
+| 26 | `fp` was one unkeyed SHA-256 over the IP, User-Agent, and platform, so a token holder could confirm a guessed client IP offline, and a combined hash could not tell which signal changed | Any issued token | Medium (privacy) | Fixed: per-signal HMAC-SHA-256 digests under the token's signing secret, truncated to 128 bits; rotation-safe through `kid`. Breaking: older tokens are signed out | `26c5357` |
+| 27 | With `multiSession()` registered, `/multi-session/set-active` turned a copied `_multi-` cookie into a working SCJWT bound to whoever presented it, in both placements | `multiSession()` registered alongside `scjwt()` | High (conditional) | Fixed: initialization and the per-request plugin-list check refuse `multiSession()`. Breaking for such configurations | `ca52da2` |
+| 28 | The signed-out rewrite deleted `Authorization` in header placement, but Better Auth merges hook-returned headers with `set` only, so the rejected Bearer value still reached the endpoint and later hooks | Header placement with an invalid SCJWT | Low | Fixed: the header is overwritten with an empty value | `b57018c` |
 
 ## Reviewed and not treated as defects
 
@@ -60,7 +64,7 @@ Severity reflects impact on authentication under the stated condition, not gener
 - Two-factor coverage is limited to the OTP method; TOTP, backup codes, trusted devices, passkeys, and provider MFA are not exercised.
 - Direct `auth.api` calls bypass Better Auth's HTTP origin and CSRF checks; applications that forward browser headers must validate `Origin` themselves.
 - Each request costs a durable-row lookup plus Better Auth's `findSession` read. This is what makes revocation immediate and should not be optimized away without measurements.
-- CI has been validated by running every workflow command locally in a clean worktree and by `actionlint`; its first hosted run, and making the `CI` check required in branch protection, are pending repository-owner action.
+- CI runs on GitHub for pull requests and pushes to `main`; making the `CI` check required in branch protection is repository-owner action.
 
 ## Verification
 
@@ -69,11 +73,11 @@ Results from the final branch state:
 | Check | Result |
 |---|---|
 | `bun run typecheck` (src; src + test + scripts) | pass |
-| `bun test` | 121 tests across 11 files pass |
-| `bun run test:package` | Node.js 24.20.0 and Bun 1.4.2 runtime imports pass; `bundler` and `NodeNext` consumer type checks pass with `skipLibCheck` off; 14 packed files verified |
-| `bun run --cwd examples/nestjs typecheck` / `test` / `build` | pass / 1 test pass / pass |
-| `bun run --cwd examples/nestjs test:e2e` | 9 profiles, 51 tests pass |
-| Production smoke (`auth:migrate` twice on a fresh database, `start:prod`) | sign-up issued an SCJWT, `/me` `200`, hostile-origin sign-out `403`, sign-out `200`, replay `401`, `rememberMe: false` kept its 24-hour expiry without re-issue |
+| `bun test` | 145 tests across 13 files pass |
+| `bun run test:package` | Node.js 24.20.0 and Bun 1.4.2 runtime imports pass; `bundler` and `NodeNext` consumer type checks pass with `skipLibCheck` off; 15 packed files verified |
+| `bun run --cwd examples/nestjs typecheck` / `test` / `build` / `lint` | pass / 1 test pass / pass / pass |
+| `bun run --cwd examples/nestjs test:e2e` | 10 profiles, 55 tests pass |
+| Production smoke (`auth:migrate` twice on a fresh database, `start:prod`) | sign-up issued an SCJWT and `/me` returned `200`; a changed User-Agent got `401` on `/me`, and `/get-session` returned `null` with a clearing cookie; sign-in while still sending the stale cookie returned `200` with a new SCJWT that reached `/me`; the old token kept working from its original device |
 | `actionlint` on `.github/workflows/ci.yml` | no issues |
 
 Regression tests were run against the pre-fix code where a fix was made, and fail there.
