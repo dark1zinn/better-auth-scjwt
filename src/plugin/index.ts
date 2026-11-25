@@ -6,6 +6,7 @@ import {
 	DEFAULT_TOKEN_PLACEMENT,
 	FINALIZER_PLUGIN_ID,
 	FINGERPRINT_PREFIX_DEFAULTS,
+	MULTI_SESSION_PLUGIN_ID,
 	PLUGIN_ID,
 } from "./constants";
 import { createScjwtHooks } from "./hooks";
@@ -65,7 +66,7 @@ export function scjwt(options: ScjwtOptions = {}): BetterAuthPlugin {
 			) {
 				throw new Error("[scjwt] register scjwt() exactly once.");
 			}
-			assertNoBearerPlugin(plugins);
+			assertSupportedPlugins(plugins);
 			return {
 				options: { plugins: [finalizer] } satisfies Partial<BetterAuthOptions>,
 			};
@@ -78,8 +79,8 @@ export function scjwt(options: ScjwtOptions = {}): BetterAuthPlugin {
 						const plugins = ctx.context.options.plugins ?? [];
 						if (!verifiedPluginLists.has(plugins)) {
 							// Plugins appended by other plugins' `init` only appear in the
-							// resolved list, so re-check bearer() here as well.
-							assertNoBearerPlugin(plugins);
+							// resolved list, so re-check unsupported plugins here as well.
+							assertSupportedPlugins(plugins);
 							assertFinalizerIsTerminal(plugins);
 							verifiedPluginLists.add(plugins);
 						}
@@ -92,13 +93,20 @@ export function scjwt(options: ScjwtOptions = {}): BetterAuthPlugin {
 }
 
 /**
- * bearer() turns a native session token from `Authorization` into a session
- * cookie that SCJWT never verifies, bypassing fingerprint and claim checks.
+ * Rejects plugins that turn Better Auth's raw native session token into a
+ * credential SCJWT never verifies, bypassing fingerprint and claim checks:
+ * bearer() reads it from `Authorization`, and multiSession() keeps it in its
+ * own cookies and activates it with `/multi-session/set-active`.
  */
-function assertNoBearerPlugin(plugins: BetterAuthPlugin[]): void {
+function assertSupportedPlugins(plugins: BetterAuthPlugin[]): void {
 	if (plugins.some((plugin) => plugin.id === BEARER_PLUGIN_ID)) {
 		throw new Error(
 			'[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt(); use scjwt({ tokenPlacement: "header" }) for Authorization: Bearer transport.',
+		);
+	}
+	if (plugins.some((plugin) => plugin.id === MULTI_SESSION_PLUGIN_ID)) {
+		throw new Error(
+			"[scjwt] the Better Auth multiSession() plugin cannot be combined with scjwt(); it keeps raw native session tokens in cookies that authenticate without SCJWT's fingerprint and claim checks.",
 		);
 	}
 }

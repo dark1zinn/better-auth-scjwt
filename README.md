@@ -243,6 +243,8 @@ The fingerprint constrains replay; it is not proof of device possession. User-Ag
 - CSRF: cookie placement is an ambient credential, and Better Auth's origin check rejects state-changing requests from untrusted or missing `Origin` exactly as for native session cookies. Header placement is not ambient (a script must attach `Authorization`), so Better Auth does not origin-check Bearer requests; restrict callers with CORS. Better Auth disables its origin check when `NODE_ENV` is `test` unless `advanced.disableOriginCheck` is set to `false`.
 - Direct `auth.api` calls do not pass through Better Auth's HTTP router, so its origin and CSRF checks do not run; routes that forward browser headers to `auth.api` must validate `Origin` themselves (see Better Auth's [security reference](https://better-auth.com/docs/reference/security)).
 - Better Auth's `bearer()` plugin cannot be registered with `scjwt()`; initialization fails with `[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt()`. Both own the session transport, and in cookie placement `bearer()` would turn the native session token returned in sign-in and sign-up response bodies into an authenticated session without SCJWT's fingerprint and claim checks. Use `scjwt({ tokenPlacement: "header" })` for `Authorization: Bearer` clients.
+- Better Auth's `multiSession()` plugin cannot be registered with `scjwt()` either; initialization fails with `[scjwt] the Better Auth multiSession() plugin cannot be combined with scjwt()`. It keeps each device session's raw native token in its own signed cookies and `/multi-session/set-active` turns any of them into the active session, so a copied cookie would yield a fresh SCJWT bound to whoever presents it. Multiple concurrent accounts per browser are not supported with SCJWT.
+- `oneTimeToken()` works with SCJWT. Generating a one-time token requires an authenticated SCJWT, and verifying it hands the session to the redeeming client as a new SCJWT bound to that client's device; the token is a short-lived, single-use credential for exactly that handoff. The native session token in the verify response body does not authenticate.
 - Revocation audit: [`docs/REVOKE_AUDIT.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/REVOKE_AUDIT.md). Security review and known limitations: [`docs/SECURITY_REVIEW.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/SECURITY_REVIEW.md).
 
 ## Migration
@@ -262,6 +264,10 @@ Endpoints that do not require a session (such as `/get-session`, sign-in, sign-u
 ### Tokens issued before the `remember` claim
 
 `remember` is a required claim. Tokens issued by earlier 0.1.x builds lack it and are rejected; requests carrying them are signed out, and users sign in again to receive a replacement. No database migration is involved, and there is no fallback that accepts the old shape.
+
+### Configurations that also register `multiSession()`
+
+Remove Better Auth's `multiSession()` plugin; it is not supported with SCJWT. Its `_multi-` cookies stop being written, and existing ones are ignored by every endpoint because the plugin is no longer registered.
 
 ### Configurations that also register `bearer()`
 

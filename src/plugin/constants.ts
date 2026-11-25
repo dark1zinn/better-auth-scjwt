@@ -4,6 +4,8 @@ export const PLUGIN_ID = "scjwt" as const;
 export const FINALIZER_PLUGIN_ID = "scjwt-session-finalizer" as const;
 /** Better Auth's native `Authorization` transport; mutually exclusive with SCJWT. */
 export const BEARER_PLUGIN_ID = "bearer" as const;
+/** Better Auth's multi-session plugin keeps raw native session tokens in cookies; unsupported with SCJWT. */
+export const MULTI_SESSION_PLUGIN_ID = "multi-session" as const;
 /**
  * Lifetime Better Auth gives `rememberMe: false` sessions regardless of
  * `session.expiresIn` (`internalAdapter.createSession`); such sessions never refresh.

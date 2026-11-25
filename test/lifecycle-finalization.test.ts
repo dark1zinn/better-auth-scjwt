@@ -4,7 +4,7 @@ import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import { parseSetCookieHeader, setSessionCookie } from "better-auth/cookies";
-import { bearer } from "better-auth/plugins";
+import { bearer, multiSession, oneTimeToken } from "better-auth/plugins";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import { kAPIErrorHeaderSymbol } from "better-call";
 import { decodeJwt } from "jose";
@@ -432,6 +432,104 @@ describe("terminal SCJWT session finalizer", () => {
 					"[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt()",
 				);
 			}
+		}
+	});
+
+	test("refuses to start alongside Better Auth's multiSession() plugin", async () => {
+		for (const tokenPlacement of PLACEMENTS) {
+			for (const order of ["scjwt-first", "multi-session-first"] as const) {
+				const plugins =
+					order === "scjwt-first"
+						? [scjwt({ tokenPlacement }), multiSession()]
+						: [multiSession(), scjwt({ tokenPlacement })];
+				const auth = betterAuth({
+					database: memoryAdapter(createMemoryDB()),
+					baseURL: TEST_BASE_URL,
+					secret: TEST_SECRET,
+					emailAndPassword: { enabled: true },
+					plugins,
+				});
+				await expect(auth.$context).rejects.toThrow(
+					"[scjwt] the Better Auth multiSession() plugin cannot be combined with scjwt()",
+				);
+			}
+		}
+	});
+
+	test("rejects requests when another plugin's init installs multiSession()", async () => {
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [
+				{ id: "installs-multi-session", init: () => ({ options: { plugins: [multiSession()] } }) },
+				scjwt(),
+			],
+		});
+		expect((await auth.$context).options.plugins?.map((plugin) => plugin.id)).toContain(
+			"multi-session",
+		);
+		await expect(
+			auth.api.signUpEmail({
+				body: signUpBody("init-multi-session@example.com"),
+				headers: new Headers(STABLE_HEADERS),
+			}),
+		).rejects.toThrow("[scjwt] the Better Auth multiSession() plugin cannot be combined with scjwt()");
+		expect(db.user).toHaveLength(0);
+	});
+
+	test("oneTimeToken() hands the session to its redeemer as an SCJWT bound to the redeemer", async () => {
+		const redeemer = { "user-agent": "redeeming-app", "sec-ch-ua-platform": '"Android"' };
+		for (const tokenPlacement of PLACEMENTS) {
+			const auth = betterAuth({
+				database: memoryAdapter(createMemoryDB()),
+				baseURL: TEST_BASE_URL,
+				secret: TEST_SECRET,
+				emailAndPassword: { enabled: true },
+				plugins: [scjwt({ tokenPlacement }), oneTimeToken()],
+			});
+			const email = `${tokenPlacement}-one-time-token@example.com`;
+			const issued = await signUpWithScjwt(auth, email);
+			const present = (token: string, from: HeaderInput) => {
+				if (tokenPlacement === "cookie") {
+					return createCookieHeaders(issued.cookieName, token, from);
+				}
+				const headers = new Headers(from);
+				headers.set("authorization", `Bearer ${token}`);
+				return headers;
+			};
+			const generate = (headers: Headers) =>
+				auth.handler(new Request(`${TEST_BASE_URL}/api/auth/one-time-token/generate`, { headers }));
+			const verify = (token: string) =>
+				auth.handler(
+					new Request(`${TEST_BASE_URL}/api/auth/one-time-token/verify`, {
+						method: "POST",
+						headers: { ...redeemer, "content-type": "application/json", origin: TEST_BASE_URL },
+						body: JSON.stringify({ token }),
+					}),
+				);
+
+			expect((await generate(new Headers(STABLE_HEADERS))).status).toBe(401);
+			const generated = await generate(present(issued.token, STABLE_HEADERS));
+			expect(generated.status).toBe(200);
+			const { token: oneTime } = (await generated.json()) as { token: string };
+
+			const verified = await verify(oneTime);
+			expect(verified.status).toBe(200);
+			const body = (await verified.json()) as { session: { token: string } };
+			const handed =
+				tokenPlacement === "header"
+					? verified.headers.get("set-auth-token")
+					: parseSetCookieHeader(verified.headers.get("set-cookie") ?? "").get(issued.cookieName)
+							?.value;
+			expect(handed?.split(".")).toHaveLength(3);
+			await expectAuthenticatedAs(await requestSession(auth, present(handed ?? "", redeemer)), email);
+			await expectSignedOut(await requestSession(auth, present(handed ?? "", STABLE_HEADERS)));
+			// The native token in the response body is not an SCJWT, and the one-time token is single use.
+			await expectSignedOut(await requestSession(auth, present(body.session.token, redeemer)));
+			expect((await verify(oneTime)).status).toBe(400);
 		}
 	});
 
