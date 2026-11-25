@@ -79,6 +79,16 @@ export function hasLiveSetCookie(headers: Headers | undefined, name: string): bo
 	return live;
 }
 
+/** Whether `headers` carries any `Set-Cookie` for `name`, live or clearing. */
+export function setsCookie(headers: Headers | undefined, name: string): boolean {
+	if (!headers) {
+		return false;
+	}
+	return getSetCookieValues(headers).some(
+		(setCookie) => parseSingleSetCookie(setCookie)?.[0] === name,
+	);
+}
+
 /**
  * Drops pending live native session cookies (session token, session data and
  * its chunks, `dontRemember`) and any pending `set-auth-token`, without

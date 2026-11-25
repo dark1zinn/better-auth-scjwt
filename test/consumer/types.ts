@@ -8,6 +8,7 @@ import {
 	type FingerprintMode,
 	type JsonValue,
 	type ScjwtFingerprint,
+	type ScjwtFingerprintOptions,
 	type ScjwtJwtPayload,
 	type ScjwtOptions,
 	type TokenPlacement,
@@ -18,7 +19,10 @@ type IsAny<T> = 0 extends 1 & T ? true : false;
 
 const options: ScjwtOptions = {
 	tokenPlacement: "header" satisfies TokenPlacement,
-	fingerprintMode: "ip-only" satisfies FingerprintMode,
+	fingerprint: {
+		mode: "dynamic" satisfies FingerprintMode,
+		ipv4Prefix: 24,
+	} satisfies ScjwtFingerprintOptions,
 	getCustomClaims: ({ user }) => ({ plan: (user.plan as JsonValue) ?? null }),
 };
 

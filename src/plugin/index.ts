@@ -5,10 +5,16 @@ import {
 	DEFAULT_FINGERPRINT_MODE,
 	DEFAULT_TOKEN_PLACEMENT,
 	FINALIZER_PLUGIN_ID,
+	FINGERPRINT_PREFIX_DEFAULTS,
 	PLUGIN_ID,
 } from "./constants";
 import { createScjwtHooks } from "./hooks";
-import type { ResolvedScjwtOptions, ScjwtOptions } from "./types";
+import type {
+	ResolvedFingerprintOptions,
+	ResolvedScjwtOptions,
+	ScjwtFingerprintOptions,
+	ScjwtOptions,
+} from "./types";
 
 declare module "@better-auth/core" {
 	interface BetterAuthPluginRegistry<AuthOptions, Options> {
@@ -125,13 +131,41 @@ function resolveOptions(options: ScjwtOptions): ResolvedScjwtOptions {
 	if (tokenPlacement !== "cookie" && tokenPlacement !== "header") {
 		throw new Error('[scjwt] tokenPlacement must be "cookie" or "header".');
 	}
-	const fingerprintMode = options.fingerprintMode ?? DEFAULT_FINGERPRINT_MODE;
-	if (fingerprintMode !== "strict" && fingerprintMode !== "ip-only") {
-		throw new Error('[scjwt] fingerprintMode must be "strict" or "ip-only".');
+	if ("fingerprintMode" in options) {
+		throw new Error(
+			'[scjwt] fingerprintMode was replaced by fingerprint.mode ("strict", "dynamic" or "loose").',
+		);
 	}
 	return {
 		tokenPlacement,
-		fingerprintMode,
+		fingerprint: resolveFingerprintOptions(options.fingerprint),
 		getCustomClaims: options.getCustomClaims,
 	};
+}
+
+/** Applies the mode's prefix defaults; explicit prefixes win. */
+function resolveFingerprintOptions(
+	options: ScjwtFingerprintOptions | undefined,
+): ResolvedFingerprintOptions {
+	if (options !== undefined && (typeof options !== "object" || options === null)) {
+		throw new Error('[scjwt] fingerprint must be an object such as { mode: "dynamic" }.');
+	}
+	const mode = options?.mode ?? DEFAULT_FINGERPRINT_MODE;
+	if (mode !== "strict" && mode !== "dynamic" && mode !== "loose") {
+		throw new Error('[scjwt] fingerprint.mode must be "strict", "dynamic" or "loose".');
+	}
+	const defaults = FINGERPRINT_PREFIX_DEFAULTS[mode];
+	return {
+		mode,
+		ipv4Prefix: assertPrefix("ipv4Prefix", options?.ipv4Prefix ?? defaults.ipv4Prefix, 32),
+		ipv6Prefix: assertPrefix("ipv6Prefix", options?.ipv6Prefix ?? defaults.ipv6Prefix, 128),
+	};
+}
+
+/** Returns `value` when it is an integer prefix length from 0 to `max`. */
+function assertPrefix(name: string, value: number, max: number): number {
+	if (!Number.isInteger(value) || value < 0 || value > max) {
+		throw new Error(`[scjwt] fingerprint.${name} must be an integer from 0 to ${max}.`);
+	}
+	return value;
 }

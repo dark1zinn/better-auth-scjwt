@@ -4,7 +4,7 @@ import { createAuthMiddleware, isAPIError } from "better-auth/api";
 import { expireCookie, parseCookies } from "better-auth/cookies";
 import { serializeSignedCookie } from "better-call";
 import { NONPERSISTENT_SESSION_SECONDS } from "./constants";
-import { computeFingerprint } from "./fingerprint";
+import { assessFingerprint, computeFingerprint } from "./fingerprint";
 import {
 	getCustomClaims,
 	getSigningSecret,
@@ -15,13 +15,14 @@ import {
 	verifyJwt,
 	type CustomClaims,
 } from "./jwt";
-import { getRequestFingerprintInput } from "./request-context";
+import { getFingerprintSignals } from "./request-context";
 import {
 	deliverSessionToken,
 	hasLiveSetCookie,
 	isHeaderOnlyNativeCookie,
 	removePendingSessionTransport,
 	SET_AUTH_TOKEN_HEADER,
+	setsCookie,
 } from "./token-deliver";
 import { extractToken } from "./token-extract";
 import type {
@@ -36,8 +37,19 @@ import type {
  * Better Auth shares between a request's before and after hooks.
  */
 type RequestState =
-	| { kind: "authenticated"; sessionId: string }
+	| { kind: "authenticated"; sessionId: string; rebind: Rebind | null }
 	| { kind: "signed-out" };
+
+/**
+ * A token accepted under a tolerated device change, re-issued for the current
+ * signals once the request succeeds. The replacement keeps the presented
+ * `exp` and `remember`, so a rebind never extends a session.
+ */
+interface Rebind {
+	nativeToken: string;
+	expiresAt: number;
+	remember: boolean;
+}
 
 const requestStates = new WeakMap<AuthContext, RequestState>();
 
@@ -102,11 +114,14 @@ export function createScjwtHooks(
 						};
 					}
 
-					const { session, user, nativeToken, payload } = authenticated;
+					const { session, user, nativeToken, payload, rebind } = authenticated;
 					ctx.context.session = { session, user };
 					requestStates.set(ctx.context, {
 						kind: "authenticated",
 						sessionId: session.id,
+						rebind: rebind
+							? { nativeToken, expiresAt: payload.exp, remember: payload.remember }
+							: null,
 					});
 					const headers = await buildAuthenticatedRequestHeaders(
 						sourceHeaders,
@@ -127,27 +142,34 @@ export function createScjwtHooks(
 					requestStates.delete(ctx.context);
 					const newSession = ctx.context.newSession;
 					if (!newSession) {
+						const pending = ctx.context.responseHeaders;
+						const sessionCookieName = ctx.context.authCookies.sessionToken.name;
+						// Decided before the cleanup below: a response that sets or clears
+						// the session cookie or delivers a token already speaks for the
+						// session, so it is never re-bound.
+						const touchesTransport =
+							setsCookie(pending, sessionCookieName) ||
+							pending?.has(SET_AUTH_TOKEN_HEADER) === true;
 						// A later hook withdrew the session (for example a pending two-factor
 						// challenge): drop the live native credential written for it so it
 						// neither leaks nor overwrites the SCJWT the client already holds.
-						const pending = ctx.context.responseHeaders;
-						if (
-							pending &&
-							hasLiveSetCookie(pending, ctx.context.authCookies.sessionToken.name)
-						) {
+						if (pending && hasLiveSetCookie(pending, sessionCookieName)) {
 							removePendingSessionTransport(pending, ctx.context.authCookies);
 						}
 						if (state?.kind === "signed-out" && options.tokenPlacement === "cookie") {
 							// The browser cannot drop an HttpOnly SCJWT on its own.
 							clearSessionTransport(ctx);
+						} else if (
+							state?.kind === "authenticated" &&
+							state.rebind &&
+							!touchesTransport &&
+							!isFailedResult(ctx.context.returned)
+						) {
+							await reissueForCurrentDevice(ctx, options, state.sessionId, state.rebind);
 						}
 						return;
 					}
-					const returned = ctx.context.returned;
-					if (
-						(isAPIError(returned) && returned.statusCode >= 400) ||
-						(returned instanceof Response && returned.status >= 400)
-					) {
+					if (isFailedResult(ctx.context.returned)) {
 						if (
 							state?.kind === "authenticated" &&
 							state.sessionId === newSession.session.id
@@ -167,10 +189,10 @@ export function createScjwtHooks(
 					}
 					const headers =
 						ctx.request?.headers ?? ctx.headers ?? new Headers();
-					const input = getRequestFingerprintInput(
+					const input = getFingerprintSignals(
 						headers,
 						ctx.context.options,
-						options.fingerprintMode,
+						options.fingerprint,
 					);
 					const remember = !hasLiveSetCookie(
 						ctx.context.responseHeaders,
@@ -232,6 +254,8 @@ interface AuthenticatedToken {
 	user: User & Record<string, unknown>;
 	nativeToken: string;
 	payload: ScjwtJwtPayload;
+	/** The device changed within the mode's tolerance; re-issue on success. */
+	rebind: boolean;
 }
 
 /**
@@ -280,13 +304,10 @@ async function authenticateToken(
 	// Better Auth's secret never looks like a device change.
 	const current = await computeFingerprint(
 		getVerificationSecret(context.secretConfig, token),
-		getRequestFingerprintInput(headers, context.options, options.fingerprintMode),
+		getFingerprintSignals(headers, context.options, options.fingerprint),
 	);
-	const fingerprintMatches =
-		payload.fp.ip === current.ip &&
-		(options.fingerprintMode === "ip-only" ||
-			(payload.fp.ua === current.ua && payload.fp.pf === current.pf));
-	if (!fingerprintMatches) {
+	const assessment = assessFingerprint(options.fingerprint.mode, payload.fp, current);
+	if (assessment === "reject") {
 		return null;
 	}
 
@@ -300,7 +321,7 @@ async function authenticateToken(
 			return null;
 		}
 	}
-	return { session, user, nativeToken, payload };
+	return { session, user, nativeToken, payload, rebind: assessment === "rebind" };
 }
 
 /**
@@ -310,6 +331,78 @@ async function authenticateToken(
  */
 function tokenLifetime(remember: boolean, context: AuthContext): number {
 	return remember ? context.sessionConfig.expiresIn : NONPERSISTENT_SESSION_SECONDS;
+}
+
+/** Whether the endpoint failed: an API error or a `Response` with status 400 or higher. */
+function isFailedResult(returned: unknown): boolean {
+	return (
+		(isAPIError(returned) && returned.statusCode >= 400) ||
+		(returned instanceof Response && returned.status >= 400)
+	);
+}
+
+/**
+ * Re-issues the presented session's SCJWT for the current request's device
+ * signals after a tolerated change (`dynamic` or `loose` mode). The session
+ * must still be live. The replacement keeps the presented expiry and
+ * `remember` policy and re-resolves custom claims, so a rebind neither
+ * extends a session nor carries stale claims.
+ */
+async function reissueForCurrentDevice(
+	ctx: GenericEndpointContext & { context: { responseHeaders?: Headers } },
+	options: ResolvedScjwtOptions,
+	sessionId: string,
+	rebind: Rebind,
+): Promise<void> {
+	const resolved = await ctx.context.internalAdapter.findSession(rebind.nativeToken);
+	if (!resolved || resolved.session.id !== sessionId) {
+		return;
+	}
+	const issuedAt = Math.floor(Date.now() / 1000);
+	const expiresAt = Math.min(
+		rebind.expiresAt,
+		Math.floor(new Date(resolved.session.expiresAt).getTime() / 1000),
+	);
+	if (expiresAt <= issuedAt) {
+		return;
+	}
+	const signals = getFingerprintSignals(
+		ctx.request?.headers ?? ctx.headers ?? new Headers(),
+		ctx.context.options,
+		options.fingerprint,
+	);
+	const customClaims = options.getCustomClaims
+		? await resolveCustomClaims(options, {
+				session: resolved.session,
+				user: resolved.user,
+				request: ctx.request,
+			})
+		: undefined;
+	const token = await signJwtFromParts({
+		secretConfig: ctx.context.secretConfig,
+		issuer: ctx.context.baseURL,
+		userId: resolved.session.userId,
+		fingerprint: await computeFingerprint(
+			getSigningSecret(ctx.context.secretConfig).secret,
+			signals,
+		),
+		sessionId,
+		expiresAt,
+		issuedAt,
+		remember: rebind.remember,
+		customClaims,
+	});
+	if (options.tokenPlacement === "cookie") {
+		const { name, attributes } = ctx.context.authCookies.sessionToken;
+		// A `rememberMe: false` session keeps a browser-session cookie.
+		ctx.setCookie(name, token, {
+			...attributes,
+			maxAge: rebind.remember ? expiresAt - issuedAt : undefined,
+		});
+		return;
+	}
+	ctx.context.responseHeaders ??= new Headers();
+	deliverSessionToken(ctx.context.responseHeaders, token, "header", ctx.context.authCookies);
 }
 
 /**

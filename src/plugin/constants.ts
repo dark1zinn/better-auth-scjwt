@@ -11,3 +11,16 @@ export const BEARER_PLUGIN_ID = "bearer" as const;
 export const NONPERSISTENT_SESSION_SECONDS: number = 60 * 60 * 24;
 export const DEFAULT_TOKEN_PLACEMENT: TokenPlacement = "cookie";
 export const DEFAULT_FINGERPRINT_MODE: FingerprintMode = "strict";
+/**
+ * Network prefixes compared per mode: `strict` binds the exact address
+ * (within Better Auth's IPv6 subnet), the tolerant modes a typical
+ * residential or mobile network.
+ */
+export const FINGERPRINT_PREFIX_DEFAULTS: Record<
+	FingerprintMode,
+	{ ipv4Prefix: number; ipv6Prefix: number }
+> = {
+	strict: { ipv4Prefix: 32, ipv6Prefix: 128 },
+	dynamic: { ipv4Prefix: 24, ipv6Prefix: 48 },
+	loose: { ipv4Prefix: 24, ipv6Prefix: 48 },
+};

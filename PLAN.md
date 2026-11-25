@@ -16,7 +16,11 @@ This document records the implemented native-session design, tested against Bett
 ```ts
 export interface ScjwtOptions {
   tokenPlacement?: "cookie" | "header";
-  fingerprintMode?: "strict" | "ip-only";
+  fingerprint?: {
+    mode?: "strict" | "dynamic" | "loose";
+    ipv4Prefix?: number; // 32 in strict, 24 otherwise
+    ipv6Prefix?: number; // 128 in strict, 48 otherwise
+  };
   getCustomClaims?: (
     context: ScjwtClaimContext,
   ) => Awaitable<Record<string, JsonValue>>;
@@ -25,7 +29,7 @@ export interface ScjwtOptions {
 export function scjwt(options?: ScjwtOptions): BetterAuthPlugin;
 ```
 
-Defaults are cookie placement and strict fingerprinting. There are no plugin-local secret, issuer, lifetime, cookie-name, or sliding-refresh options.
+Defaults are cookie placement and strict fingerprinting. There are no plugin-local secret, issuer, lifetime, cookie-name, or sliding-refresh options. The removed `fingerprintMode` option fails option resolution with a message naming `fingerprint.mode`.
 
 ## Initialization
 
@@ -41,7 +45,7 @@ For every endpoint:
 2. Verify HS256, optional versioned-secret `kid`, issuer, `exp`, core payload shape, and custom JSON shape.
 3. Load the row by `sid` only to recover its opaque native `session.token`, then call `internalAdapter.findSession(token)`. Fail when the row is missing, `findSession` returns null (for example, the secondary store dropped a preserved row's session), or the resolved session id differs from `sid`.
 4. Using the authoritative session and user, fail an expired session, subject mismatch, or token lifetime beyond Better Auth's effective session limit.
-5. Recompute the selected fingerprint and fail a mismatch without deleting the shared backing session, so a mismatched bearer cannot terminate a legitimate device's session.
+5. Digest the request's signals (Better Auth `getIP` reduced to the configured network prefix, User-Agent, `Sec-CH-UA-Platform`) with the secret selected by the token's `kid`, and compare them with `fp` under the mode: `strict` fails any change; `dynamic` fails a platform change or a simultaneous network and User-Agent change and tolerates one of the two; `loose` tolerates every change. A failure never deletes the shared backing session, so a mismatched bearer cannot terminate a legitimate device's session; a tolerated change is recorded for re-binding.
 6. If configured, rerun `getCustomClaims` against the authoritative session/user and require exact JSON equality; do not delete the row on authorization-state mismatch.
 
 Any failure in steps 2–6 removes the SCJWT and the native session cookies from the request, records the request as signed out for the session finalizer, and continues. Storage errors propagate as server errors. On success:
@@ -57,15 +61,17 @@ SCJWT is a universal `hooks.before[]`/`hooks.after[]` plugin with `matcher: () =
 
 For every successful endpoint with `ctx.context.newSession`:
 
-1. Derive the fingerprint from Better Auth `getIP` plus the configured browser inputs.
+1. Derive the fingerprint digests from Better Auth `getIP` (reduced to the configured network) plus the browser headers, keyed with the current signing secret.
 2. Resolve and validate custom claims.
-3. Set `iat` and cap `exp` to `min(session.expiresAt, iat + sessionConfig.expiresIn)`.
+3. Set `iat` and cap `exp` to `min(session.expiresAt, iat + lifetime)`, where `lifetime` is `sessionConfig.expiresIn` for remembered sessions and one day for `rememberMe: false` sessions.
 4. Sign with Better Auth's current secret material.
 5. Replace the live native session-token cookie or emit `set-auth-token`, according to placement.
 
 Returned API errors and non-2xx `Response` values do not receive a replacement token. Better Auth `session.updateAge` is the only refresh policy.
 
 For a request the before hook signed out that establishes no new session, cookie placement clears the SCJWT and Better Auth's session cookies; header placement emits nothing. The before hook records its outcome per request, keyed by the request's `AuthContext`, which Better Auth shares between a request's before and after hooks.
+
+For a request authenticated under a tolerated device change that establishes no new session, the finalizer re-binds the presented token when the result succeeded, the response neither sets nor clears the session cookie nor carries `set-auth-token`, and `internalAdapter.findSession` still returns the session. The replacement keeps the session ID, `exp`, and `remember`, re-resolves custom claims, and carries digests of the current request; cookie placement sets it as the session cookie (no `Max-Age` for `remember: false`), header placement as `set-auth-token`.
 
 ## Token schema
 

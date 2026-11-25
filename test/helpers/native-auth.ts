@@ -8,8 +8,8 @@ import {
 	signJwtFromParts,
 	type ScjwtSecretConfig,
 } from "../../src/plugin/jwt";
-import { getRequestFingerprintInput } from "../../src/plugin/request-context";
-import type { FingerprintMode } from "../../src/plugin/types";
+import { getFingerprintSignals } from "../../src/plugin/request-context";
+import type { ResolvedFingerprintOptions } from "../../src/plugin/types";
 
 export const TEST_BASE_URL = "http://localhost:3000";
 export const TEST_SECRET = "better-auth-scjwt-test-secret-at-least-32-bytes";
@@ -28,11 +28,18 @@ export type TestDB = MemoryDB & {
 };
 
 interface MintContext {
-	options: Parameters<typeof getRequestFingerprintInput>[1];
+	options: Parameters<typeof getFingerprintSignals>[1];
 	secretConfig: ScjwtSecretConfig;
 	baseURL: string;
 	sessionConfig: { expiresIn: number };
 }
+
+/** The resolved defaults of `strict` mode, which every suite uses unless it says otherwise. */
+const STRICT_FINGERPRINT: ResolvedFingerprintOptions = {
+	mode: "strict",
+	ipv4Prefix: 32,
+	ipv6Prefix: 128,
+};
 export interface TestAuth {
 	handler(request: Request): Promise<Response>;
 	$context: Promise<{ authCookies: AuthContext["authCookies"] }>;
@@ -118,17 +125,16 @@ export async function expectSignedOut(response: Response): Promise<void> {
 	expect(await response.json()).toBeNull();
 }
 
+/** Signs an SCJWT for `session` bound to `headers` under strict fingerprinting. */
 export async function mintScjwt(
 	context: MintContext,
 	session: Session,
 	headers: HeaderInput = STABLE_HEADERS,
-	fingerprintMode: FingerprintMode = "strict",
 ): Promise<string> {
-	const requestHeaders = new Headers(headers);
-	const input = getRequestFingerprintInput(
-		requestHeaders,
+	const input = getFingerprintSignals(
+		new Headers(headers),
 		context.options,
-		fingerprintMode,
+		STRICT_FINGERPRINT,
 	);
 	const issuedAt = Math.floor(Date.now() / 1000);
 	return signJwtFromParts({

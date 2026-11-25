@@ -1,5 +1,12 @@
 import type { FingerprintSignals } from "./request-context";
-import type { ScjwtFingerprint } from "./types";
+import type { FingerprintMode, ScjwtFingerprint } from "./types";
+
+/**
+ * Outcome of comparing a token's digests with the current request's:
+ * `match` authenticates as is, `rebind` authenticates and re-issues the token
+ * for the current signals, `reject` signs the request out.
+ */
+export type FingerprintAssessment = "match" | "rebind" | "reject";
 
 /** Bytes kept from each HMAC-SHA-256 digest (32 lowercase hex characters). */
 const DIGEST_BYTES = 16;
@@ -37,6 +44,32 @@ export async function computeFingerprint(
 		digestSignal(key, "pf", signals.platform),
 	]);
 	return { ip, ua, pf };
+}
+
+/**
+ * Applies the fingerprint mode to the signals that changed. `strict` rejects
+ * any change and `loose` tolerates every change. `dynamic` requires the
+ * platform to match and tolerates a change of the IP network or the
+ * User-Agent, but not both at once.
+ */
+export function assessFingerprint(
+	mode: FingerprintMode,
+	presented: ScjwtFingerprint,
+	current: ScjwtFingerprint,
+): FingerprintAssessment {
+	const ipChanged = presented.ip !== current.ip;
+	const uaChanged = presented.ua !== current.ua;
+	const platformChanged = presented.pf !== current.pf;
+	if (!ipChanged && !uaChanged && !platformChanged) {
+		return "match";
+	}
+	if (mode === "loose") {
+		return "rebind";
+	}
+	if (mode === "dynamic" && !platformChanged && !(ipChanged && uaChanged)) {
+		return "rebind";
+	}
+	return "reject";
 }
 
 /** Truncated HMAC of one named signal, as lowercase hex. */

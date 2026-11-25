@@ -21,7 +21,8 @@ const DEVICE = {
 	"user-agent": "privacy-browser/1.0",
 	"sec-ch-ua-platform": '"Linux"',
 };
-const SIGNALS = { ip: CLIENT_IP, ua: "privacy-browser/1.0", platform: "Linux" };
+/** The signals strict mode digests: the client network (`/32`), User-Agent, and platform. */
+const SIGNALS = { ip: `${CLIENT_IP}/32`, ua: "privacy-browser/1.0", platform: "Linux" };
 const OTHER_SECRET = "a-different-secret-that-is-at-least-32-bytes";
 const SECRET_V1 = "rotation-secret-version-one-at-least-32-bytes";
 const SECRET_V2 = "rotation-secret-version-two-at-least-32-bytes";
@@ -59,8 +60,9 @@ describe("keyed fingerprint digests", () => {
 		// Unkeyed hashes of the signals, including the previous combined encoding,
 		// are what a token holder could compute offline; none of them appear.
 		const unkeyed = [
-			sha256(JSON.stringify(SIGNALS)),
+			sha256(JSON.stringify({ ip: CLIENT_IP, ua: SIGNALS.ua, platform: SIGNALS.platform })),
 			sha256(CLIENT_IP),
+			sha256(SIGNALS.ip),
 			sha256(SIGNALS.ua),
 			sha256(SIGNALS.platform),
 		];
