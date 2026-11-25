@@ -190,4 +190,25 @@ describe('NestJS SCJWT-only profile', () => {
 
     expect((await harness.getWithToken('/me', token)).status).toBe(401);
   });
+
+  it('treats a revoked SCJWT as signed out: reads clear it and sign-in works', async () => {
+    const email = 'stale-cookie@example.com';
+    const reader = harness.createClient();
+    await signUp(reader, email);
+    const returning = harness.createClient();
+    const staleToken = await signIn(returning, email);
+    const other = harness.createClient();
+    await signIn(other, email);
+    expect((await other.post('/api/auth/revoke-sessions')).status).toBe(200);
+
+    const read = await reader.get('/api/auth/get-session');
+    expect(read.status).toBe(200);
+    expect(JSON.parse(read.text)).toBeNull();
+    expect(reader.token()).toBeUndefined();
+
+    expect(returning.token()).toBe(staleToken);
+    const replacement = await signIn(returning, email);
+    expect(replacement).not.toBe(staleToken);
+    expect((await returning.get('/me')).status).toBe(200);
+  });
 });

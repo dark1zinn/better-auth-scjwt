@@ -9,6 +9,7 @@ import {
 	TEST_BASE_URL,
 	TEST_SECRET,
 	createMemoryDB,
+	expectSignedOut,
 	requestSession,
 	rowAt,
 	type TestDB,
@@ -120,13 +121,18 @@ describe("cookie cache under SCJWT", () => {
 		expect((await readSession(auth, browserHeaders(cookies))).user.bio).toBe("short");
 	});
 
-	test("a revoked session stays rejected while its snapshot is still fresh", async () => {
+	test("a revoked session is signed out and its fresh snapshot is cleared", async () => {
 		const db = createMemoryDB();
 		const auth = createAuth(db);
+		const context = await auth.$context;
 		const { cookies } = await signUp(auth, "revoked-cache@example.com");
-		await (await auth.$context).internalAdapter.deleteSession(rowAt(db.session).token);
+		await context.internalAdapter.deleteSession(rowAt(db.session).token);
 		const response = await requestSession(auth, browserHeaders(cookies));
-		expect(response.status).toBe(401);
+		const cleared = parseSetCookieHeader(response.headers.get("set-cookie") ?? "");
+		for (const name of [context.authCookies.sessionToken.name, context.authCookies.sessionData.name]) {
+			expect({ name, maxAge: cleared.get(name)?.["max-age"] }).toEqual({ name, maxAge: 0 });
+		}
+		await expectSignedOut(response);
 	});
 
 	test("another user's snapshot cannot change who the SCJWT authenticates", async () => {

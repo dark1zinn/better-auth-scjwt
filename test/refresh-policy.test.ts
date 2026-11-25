@@ -11,6 +11,7 @@ import {
 	TEST_SECRET,
 	createCookieHeaders,
 	createMemoryDB,
+	expectSignedOut,
 	requestSession,
 	rowAt,
 	signUpWithScjwt,
@@ -177,7 +178,7 @@ describe("password changes and resets", () => {
 		expect(replacement?.split(".")).toHaveLength(3);
 		for (const token of [first.token, second]) {
 			const response = await requestSession(auth, createCookieHeaders(first.cookieName, token));
-			expect(response.status).toBe(401);
+			await expectSignedOut(response);
 		}
 		const current = await requestSession(
 			auth,

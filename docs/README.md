@@ -21,22 +21,25 @@ SCJWT intentionally performs authoritative reads for each presented token: one d
 ```mermaid
 flowchart TD
   A[Configured cookie or Bearer token] --> B[Verify HS256, kid, issuer, exp, and payload]
-  B -->|Invalid| X[Return 401]
+  B -->|Invalid| X[Remove credentials and continue signed out]
   B --> C[Load durable session row by sid]
   C --> L[internalAdapter.findSession on the row's native token]
   L -->|Missing, revoked, or another session| X
   L -->|Store unavailable| Y[Fail with 500, issue nothing]
   L --> D[Check subject and effective expiry]
+  D -->|Expired or foreign subject| X
   D --> E[Recompute fingerprint]
-  E -->|Mismatch| F[Keep session and return 401]
+  E -->|Mismatch| F[Keep session and continue signed out]
   E -->|Match| G[Recompute custom claims from the current session and user]
-  G -->|Mismatch| H[Keep session and return 401]
+  G -->|Mismatch| H[Keep session and continue signed out]
   G -->|Match| I[Request-only cookies: signed native token, dontRemember when remember is false, no session_data]
   I --> J[Run normal Better Auth endpoint and middleware]
   J --> K[Session finalizer after all plugin after-hooks issues a replacement SCJWT on success]
 ```
 
 The injected cookies never replace the response transport. They exist only in the current request headers so Better Auth's native `getSession`, sensitive-session middleware, account endpoints, and third-party plugins follow their standard path. A caller-supplied `dontRemember` cookie is always discarded; the marker comes only from the signed `remember` claim. Cookie-cache `session_data` cookies (including chunks) are removed from the same request, so a client-held snapshot can never replace the session and user that `internalAdapter.findSession` just returned, even when `session.cookieCache` is enabled.
+
+A token that fails any check gets the opposite rewrite: the SCJWT and every native session cookie are removed, so Better Auth handles an anonymous request, exactly as it would for an invalid native session cookie. Sign-in and sign-up proceed, `/get-session` returns `null`, and endpoints that require a session answer `401` themselves. Unless the request establishes a new session, the session finalizer then clears the client's SCJWT and session cookies in cookie placement. The backing session is never touched, so a foreign or stale token cannot end it.
 
 ## Issuance and refresh flow
 
@@ -96,12 +99,12 @@ Plain Better Auth `secret` produces an HS256 token without `kid`. Better Auth ve
 
 ## Verification inventory
 
-- `test/native-session.test.ts`: cookie/header transport, native `getSession`, custom secure prefixes, precedence, callback and raw-redirect issuance, failure suppression, core sign-out; origin checks on cookie-placement mutations (with production `disableOriginCheck: false`), header placement as a non-ambient credential, no fallback to the unselected transport for present-invalid credentials, and Bearer scheme parsing.
+- `test/native-session.test.ts`: cookie/header transport, native `getSession`, custom secure prefixes, precedence, callback and raw-redirect issuance, failure suppression, core sign-out; origin checks on cookie-placement mutations (with production `disableOriginCheck: false`), header placement as a non-ambient credential, no fallback to the unselected transport for present-invalid credentials, and Bearer scheme parsing; invalid tokens signed out in both placements: sign-in with a revoked token, sign-out from a mismatched device without ending the session, cookie clearing on reads, and session-required endpoints still answering `401`.
 - `test/custom-claims.test.ts`: issuance/refresh resolver calls (exactly one per issuance and verification), JSON limits at their exact boundaries (16/17 keys, 1024/1025 UTF-8 bytes including multi-byte text, 8/9 nested containers), cycles versus repeated references, reserved names, prototype-named keys, JSON numeric equality, strict default payload, dynamic mismatch, secret rotation.
-- `test/jwt-security.test.ts`: endpoint-level rejection of tampered signatures and payloads, foreign secrets and issuers, expired and exact-expiry tokens, `alg: none` and HS384, each missing core claim, wrong claim types and fractional timestamps, malformed fingerprints, foreign subjects, unknown sessions, and expiries beyond the stored session or configured lifetime; versioned-secret rotation with retained, removed, unknown, missing, malformed, and non-string `kid`, and plain secrets rejecting any `kid`. Every rejection is the same generic `401` with no issued credential, and the valid control session survives. Cases follow [RFC 8725](https://www.rfc-editor.org/rfc/rfc8725.html) algorithm, issuer/subject, and claim-validation practices; they are boundary checks, not a security certification.
+- `test/jwt-security.test.ts`: endpoint-level rejection of tampered signatures and payloads, foreign secrets and issuers, expired and exact-expiry tokens, `alg: none` and HS384, each missing core claim, wrong claim types and fractional timestamps, malformed fingerprints, foreign subjects, unknown sessions, and expiries beyond the stored session or configured lifetime; versioned-secret rotation with retained, removed, unknown, missing, malformed, and non-string `kid`, and plain secrets rejecting any `kid`. Every rejection is the same signed-out answer (`200` with a `null` session) with no issued credential, and the valid control session survives. Cases follow [RFC 8725](https://www.rfc-editor.org/rfc/rfc8725.html) algorithm, issuer/subject, and claim-validation practices; they are boundary checks, not a security certification.
 - `test/lifecycle-finalization.test.ts`: terminal finalizer ordering, late denial and session withdrawal or substitution, HTTP and direct `auth.api` parity, shared plugin instances, finalizer-position and duplicate-registration guards, refusal to start with Better Auth's `bearer()` plugin in either order and placement, and header placement during a pending two-factor challenge.
 - `test/session-lifetime.test.ts`: `rememberMe: false` sessions in both placements keep their native expiry without sliding, remembered sessions refresh, supplied `dontRemember` cookies are ignored, re-issuance inherits the policy, and a remembered sign-in replaces a non-persistent session.
-- `test/session-cache.test.ts`: compact/jwt/jwe and chunked `session_data` snapshots never override current session and user data, revoked sessions stay rejected, foreign snapshots cannot change the authenticated user, header placement ignores native caches, and refresh plus the non-persistent policy still apply.
+- `test/session-cache.test.ts`: compact/jwt/jwe and chunked `session_data` snapshots never override current session and user data, revoked sessions are signed out and their snapshot cleared, foreign snapshots cannot change the authenticated user, header placement ignores native caches, and refresh plus the non-persistent policy still apply.
 - `test/fingerprint-mode.test.ts`: missing headers, strict mismatch rejection without session deletion, IP-only behavior, trusted proxies, missing-IP behavior in both modes, IPv6 subnet binding, untrusted multi-hop chains, and direct `auth.api` issuance bound to the server's request context.
 - `test/secondary-storage.test.ts`: database and secondary-storage initialization invariants, preserved-row eviction, fail-closed `500` without credentials for session-row and secondary-storage read failures (no fallback between stores), rejection when the store resolves a different session than `sid`, and a refresh deterministically paused while the session is revoked.
 - `test/refresh-policy.test.ts`: `disableSessionRefresh`, the `disableRefresh` query, deferred GET/POST refresh, `freshAge` on fresh-session routes, default and revoking password changes, and password reset without configured revocation.

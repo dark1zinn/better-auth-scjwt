@@ -5,11 +5,11 @@ This document records the implemented native-session design, tested against Bett
 ## Invariants
 
 1. **Lifecycle authority:** `sid` identifies a Better Auth database session row. Every presented SCJWT must resolve that row and then pass Better Auth's lifecycle-aware `internalAdapter.findSession` before authentication succeeds.
-2. **Immediate revocation:** a deleted or expired row makes the next SCJWT request unauthorized.
+2. **Immediate revocation:** a deleted or expired row makes the next SCJWT request signed out.
 3. **Native compatibility:** verified requests are converted into a correctly signed Better Auth session cookie and continue through the standard endpoint pipeline.
 4. **Single configuration source:** Better Auth owns secrets, issuer/base URL, session lifetime, refresh timing, cookie settings, and proxy/IP resolution.
 5. **Deterministic transport:** exactly one configured source is read. Cookie and header values never silently override each other.
-6. **Fail closed:** a present invalid SCJWT returns Better Auth `UNAUTHORIZED`; a missing token falls through.
+6. **Fail closed, recover cleanly:** a present SCJWT that fails any check never authenticates. It and every native session cookie are removed from the request, which continues signed out exactly as with an invalid native session cookie: endpoints that require a session answer Better Auth `UNAUTHORIZED`, while sign-in and sign-up still work. In cookie placement the response clears the stale cookie unless a new session is established. A missing token falls through.
 
 ## Public API
 
@@ -39,12 +39,15 @@ For every endpoint:
 
 1. Read the SCJWT from the selected Better Auth session cookie or Bearer header.
 2. Verify HS256, optional versioned-secret `kid`, issuer, `exp`, core payload shape, and custom JSON shape.
-3. Load the row by `sid` only to recover its opaque native `session.token`, then call `internalAdapter.findSession(token)`. Reject when the row is missing, `findSession` returns null (for example, the secondary store dropped a preserved row's session), or the resolved session id differs from `sid`.
-4. Using the authoritative session and user, reject an expired session, subject mismatch, or token lifetime beyond Better Auth's effective session limit.
-5. Recompute the selected fingerprint. Reject a mismatch with `401` without deleting the shared backing session, so a mismatched bearer cannot terminate a legitimate device's session.
+3. Load the row by `sid` only to recover its opaque native `session.token`, then call `internalAdapter.findSession(token)`. Fail when the row is missing, `findSession` returns null (for example, the secondary store dropped a preserved row's session), or the resolved session id differs from `sid`.
+4. Using the authoritative session and user, fail an expired session, subject mismatch, or token lifetime beyond Better Auth's effective session limit.
+5. Recompute the selected fingerprint and fail a mismatch without deleting the shared backing session, so a mismatched bearer cannot terminate a legitimate device's session.
 6. If configured, rerun `getCustomClaims` against the authoritative session/user and require exact JSON equality; do not delete the row on authorization-state mismatch.
-7. Serialize the opaque `session.token` using Better Call's signed-cookie serializer and inject it under `ctx.context.authCookies.sessionToken.name` with Better Auth's `setRequestCookie`.
-8. Populate `ctx.context.session` and continue the native pipeline.
+
+Any failure in steps 2–6 removes the SCJWT and the native session cookies from the request, records the request as signed out for the session finalizer, and continues. Storage errors propagate as server errors. On success:
+
+1. Serialize the opaque `session.token` using Better Call's signed-cookie serializer and inject it under `ctx.context.authCookies.sessionToken.name` with Better Auth's `setRequestCookie`.
+2. Populate `ctx.context.session` and continue the native pipeline.
 
 ## Strategy seam: plugin hooks and `newSession`
 
@@ -61,6 +64,8 @@ For every successful endpoint with `ctx.context.newSession`:
 5. Replace the live native session-token cookie or emit `set-auth-token`, according to placement.
 
 Returned API errors and non-2xx `Response` values do not receive a replacement token. Better Auth `session.updateAge` is the only refresh policy.
+
+For a request the before hook signed out that establishes no new session, cookie placement clears the SCJWT and Better Auth's session cookies; header placement emits nothing. The before hook records its outcome per request, keyed by the request's `AuthContext`, which Better Auth shares between a request's before and after hooks.
 
 ## Token schema
 
@@ -108,4 +113,4 @@ bun test
 bun run build
 ```
 
-The build must emit declarations for both package entrypoints. The test suite must prove native `getSession`, cookie/header delivery, effective expiry, callback issuance, refresh and `update-session` re-issuance with a stable `sid`, 2xx-only replacement, dynamic claims, fingerprint rejection without session deletion, storage invariants including secondary-store eviction of a preserved row, and admin revocation. The NestJS example's `test:e2e` profiles prove the same contract over HTTP with Admin, Admin RBAC, i18n, captcha, username, email OTP, and their combination.
+The build must emit declarations for both package entrypoints. The test suite must prove native `getSession`, cookie/header delivery, effective expiry, callback issuance, refresh and `update-session` re-issuance with a stable `sid`, 2xx-only replacement, dynamic claims, fingerprint rejection without session deletion, signed-out handling of invalid tokens, storage invariants including secondary-store eviction of a preserved row, and admin revocation. The NestJS example's `test:e2e` profiles prove the same contract over HTTP with Admin, Admin RBAC, i18n, captcha, username, email OTP, and their combination.

@@ -9,6 +9,7 @@ import {
 	TEST_SECRET,
 	createCookieHeaders,
 	createMemoryDB,
+	expectSignedOut,
 	requestSession,
 	rowAt,
 	signUpWithScjwt,
@@ -109,7 +110,7 @@ describe("database-backed session invariant", () => {
 		expect(new Date(row.expiresAt).getTime()).toBeGreaterThan(Date.now());
 
 		const response = await requestSession(auth, headers);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 	});
 });
 
@@ -226,7 +227,7 @@ describe("authoritative storage failures", () => {
 		const original = values.get(victimRow.token);
 		values.set(victimRow.token, values.get(otherRow.token) ?? "");
 		const headers = createCookieHeaders(victim.cookieName, victim.token);
-		expect((await requestSession(auth, headers)).status).toBe(401);
+		await expectSignedOut(await requestSession(auth, headers));
 		values.set(victimRow.token, original ?? "");
 		expect((await requestSession(auth, headers)).status).toBe(200);
 	});
@@ -269,7 +270,7 @@ describe("authoritative storage failures", () => {
 					auth,
 					createCookieHeaders(issued.cookieName, token),
 				);
-				expect(response.status).toBe(401);
+				await expectSignedOut(response);
 			}
 		} finally {
 			setSystemTime();

@@ -5,6 +5,7 @@ import { scjwt } from "../src/plugin/index";
 import {
 	createCookieHeaders,
 	createMemoryDB,
+	expectSignedOut,
 	requestSession,
 	signUpWithScjwt,
 	TEST_BASE_URL,
@@ -63,7 +64,7 @@ describe("fingerprint modes", () => {
 				mismatch.requested,
 			);
 			const response = await requestSession(auth, headers);
-			expect(response.status).toBe(401);
+			await expectSignedOut(response);
 			const matchingResponse = await requestSession(
 				auth,
 				createCookieHeaders(issued.cookieName, issued.token, mismatch.issued),
@@ -121,7 +122,7 @@ describe("fingerprint modes", () => {
 				"x-forwarded-for": "203.0.113.21, 192.0.2.10",
 			}),
 		);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 		const matchingResponse = await requestSession(
 			auth,
 			createCookieHeaders(issued.cookieName, issued.token, {
@@ -162,7 +163,12 @@ describe("fingerprint modes", () => {
 					"x-forwarded-for": "198.51.100.7",
 				}),
 			);
-			expect(otherBrowser.status).toBe(fingerprintMode === "strict" ? 401 : 200);
+			if (fingerprintMode === "strict") {
+				await expectSignedOut(otherBrowser);
+			} else {
+				expect(otherBrowser.status).toBe(200);
+				expect(await otherBrowser.json()).not.toBeNull();
+			}
 		}
 	});
 
@@ -191,7 +197,7 @@ describe("fingerprint modes", () => {
 				"x-forwarded-for": "2001:db8:1:3::1",
 			}),
 		);
-		expect(otherSubnet.status).toBe(401);
+		await expectSignedOut(otherSubnet);
 	});
 
 	test("ignores multi-hop forwarded chains when no proxy is trusted", async () => {
@@ -238,7 +244,7 @@ describe("fingerprint modes", () => {
 			auth,
 			new Headers({ "user-agent": "browser", authorization: `Bearer ${token}` }),
 		);
-		expect(browser.status).toBe(401);
+		await expectSignedOut(browser);
 		const server = await requestSession(
 			auth,
 			new Headers({ "user-agent": "backend-service", authorization: `Bearer ${token}` }),

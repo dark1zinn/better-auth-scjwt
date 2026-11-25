@@ -17,6 +17,7 @@ import {
 	TEST_SECRET,
 	createCookieHeaders,
 	createMemoryDB,
+	expectSignedOut,
 	requestSession,
 	rowAt,
 	signUpWithScjwt,
@@ -106,7 +107,7 @@ describe("custom SCJWT claims", () => {
 			auth,
 			createCookieHeaders(issued.cookieName, issued.token),
 		);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 		expect(db.session).toHaveLength(1);
 	});
 
@@ -153,7 +154,7 @@ describe("custom SCJWT claims", () => {
 			auth,
 			createCookieHeaders(issued.cookieName, issued.token),
 		);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 		expect(db.session).toHaveLength(1);
 	});
 

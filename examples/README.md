@@ -5,7 +5,7 @@ Framework examples exercise `better-auth-scjwt` through production-style applica
 ## NestJS
 
 `examples/nestjs` is a Bun-run NestJS application generated with the Nest CLI. It uses the community-maintained `@thallesp/nestjs-better-auth` Express integration, Better Auth 1.7.18's Bun-native SQLite support, email/password authentication, and the local `better-auth-scjwt` package. Nest body parsing is disabled at application creation so the Better Auth integration can consume auth request bodies correctly.
-The app registers a narrow Nest exception filter for Better Auth `APIError` values so invalid or revoked SCJWTs encountered by the integration's global guard retain their `401` status instead of becoming generic server errors.
+An invalid, expired, or revoked SCJWT leaves the request signed out, so the integration's global guard answers `401` through Nest's own `UnauthorizedException`; no exception filter is needed.
 The example consumes the root package through `file:../..`. Its `build`, `test`, `test:e2e`, `typecheck`, `auth:migrate`, and `start:dev` scripts first run `sync:scjwt`, which rebuilds the root `dist` and refreshes the local copy with `bun install --frozen-lockfile --ignore-scripts --force`, so they never load a missing or stale `dist` and a refresh can neither rerun lifecycle scripts nor change locked dependency versions.
 
 The only application-owned routes are:
@@ -27,7 +27,7 @@ Each profile file builds its own Better Auth instance through the factory, a uni
 
 | Profile | Plugins after `scjwt()` | Proves |
 |---|---|---|
-| `scjwt-only` | none | Sign-up/in, session lookup/listing, targeted and session-wide revocation, password change, sign-out, invalid credentials and SCJWTs |
+| `scjwt-only` | none | Sign-up/in, session lookup/listing, targeted and session-wide revocation, password change, sign-out, invalid credentials and SCJWTs, and recovery from a revoked SCJWT still held in the cookie jar (signed-out read clears it; sign-in succeeds) |
 | `admin` | `admin()` | Denial for anonymous/ordinary users, user CRUD, roles, ban/unban, session revocation, impersonation with `admin_session` restoration, password set, user removal |
 | `rbac` | `admin({ ac, roles })` | Custom `project` statement, `auditor` role, `has-permission`, role changes observed by existing SCJWTs without new sessions |
 | `i18n` | `i18n()` | Header/cookie/stored-user locale detection on translated errors |

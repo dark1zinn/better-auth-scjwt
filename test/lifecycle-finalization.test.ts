@@ -15,6 +15,7 @@ import {
 	TEST_SECRET,
 	createCookieHeaders,
 	createMemoryDB,
+	expectSignedOut,
 	requestSession,
 	rowAt,
 	signUpWithScjwt,
@@ -352,9 +353,7 @@ describe("terminal SCJWT session finalizer", () => {
 			(await requestSession(plain, bearerHeaders(issued.token))).status,
 		).toBe(200);
 		// The token is bound to the issuing instance's secret.
-		expect(
-			(await requestSession(denied, bearerHeaders(issued.token))).status,
-		).toBe(401);
+		await expectSignedOut(await requestSession(denied, bearerHeaders(issued.token)));
 		expect((await plain.$context).options.plugins?.map((plugin) => plugin.id)).toEqual([
 			"scjwt",
 			"scjwt-session-finalizer",

@@ -1,3 +1,4 @@
+import { expect } from "bun:test";
 import type { AuthContext, Session } from "better-auth";
 import type { MemoryDB } from "better-auth/adapters/memory";
 import { parseSetCookieHeader } from "better-auth/cookies";
@@ -102,6 +103,15 @@ export async function requestSession(
 	return auth.handler(
 		new Request(`${baseURL}/api/auth/get-session`, { headers }),
 	);
+}
+
+/**
+ * Asserts a signed-out `get-session` answer: `200` with a `null` body, which is
+ * how Better Auth answers when no session authenticates the request.
+ */
+export async function expectSignedOut(response: Response): Promise<void> {
+	expect(response.status).toBe(200);
+	expect(await response.json()).toBeNull();
 }
 
 export async function mintScjwt(

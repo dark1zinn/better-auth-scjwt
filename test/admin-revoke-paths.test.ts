@@ -8,6 +8,7 @@ import {
 	TEST_SECRET,
 	createCookieHeaders,
 	createMemoryDB,
+	expectSignedOut,
 	mintScjwt,
 	requestSession,
 } from "./helpers/native-auth";
@@ -68,7 +69,7 @@ describe("Better Auth admin revocation paths", () => {
 				targetToken,
 			),
 		);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 		expect(
 			harness.db.session.some((session) => session.id === targetLogin.session.id),
 		).toBe(false);
@@ -94,7 +95,7 @@ describe("Better Auth admin revocation paths", () => {
 				targetToken,
 			),
 		);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 		expect(
 			harness.db.session.some((session) => session.id === targetLogin.session.id),
 		).toBe(false);
@@ -122,7 +123,7 @@ describe("Better Auth admin revocation paths", () => {
 					token,
 				),
 			);
-			expect(response.status).toBe(401);
+			await expectSignedOut(response);
 		}
 		expect(
 			harness.db.session.filter(

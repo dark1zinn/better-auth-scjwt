@@ -106,7 +106,7 @@ With `secondaryStorage`, `findSession` consults the secondary store first. A ses
 
 ### Cookie cache
 
-Better Auth's `session.cookieCache` stores a signed `session_data` snapshot in the browser so `getSession` can skip the session store until the snapshot expires. Under SCJWT the snapshot is never the server-side source of truth: for every request with a verified SCJWT, the before hook removes `session_data` (and its chunks) from the request it hands to Better Auth, so `/get-session`, guards built on `auth.api.getSession` such as `@thallesp/nestjs-better-auth`, and other endpoints read the current session and user from the store. Role downgrades, profile changes, and session-field updates therefore take effect on the next request instead of after `cookieCache.maxAge`. Better Auth may still emit `session_data` in responses, and client-side code that reads it (for example a UI session store) can show older data until it refreshes; server authorization is unaffected. A revoked session is rejected before any endpoint runs, with or without a snapshot.
+Better Auth's `session.cookieCache` stores a signed `session_data` snapshot in the browser so `getSession` can skip the session store until the snapshot expires. Under SCJWT the snapshot is never the server-side source of truth: for every request with a verified SCJWT, the before hook removes `session_data` (and its chunks) from the request it hands to Better Auth, so `/get-session`, guards built on `auth.api.getSession` such as `@thallesp/nestjs-better-auth`, and other endpoints read the current session and user from the store. Role downgrades, profile changes, and session-field updates therefore take effect on the next request instead of after `cookieCache.maxAge`. Better Auth may still emit `session_data` in responses, and client-side code that reads it (for example a UI session store) can show older data until it refreshes; server authorization is unaffected. A revoked session is signed out before any endpoint runs, with or without a snapshot, and in cookie placement the response clears the snapshot together with the SCJWT.
 
 ### Header placement
 
@@ -123,9 +123,9 @@ Send the value back as:
 Authorization: Bearer <SCJWT>
 ```
 
-Live native session-token, session-data, and `dontRemember` cookies are removed from successful issuance responses; account and clearing cookies are preserved. Header clients must remove their locally stored Bearer token after logout or revocation because a server cannot clear client-managed authorization state.
+Live native session-token, session-data, and `dontRemember` cookies are removed from successful issuance responses; account and clearing cookies are preserved. Header clients must remove their locally stored Bearer token after logout or revocation because a server cannot clear client-managed authorization state. A `null` session from `/get-session` means the stored token no longer authenticates.
 
-The configured placement is authoritative. Cookie mode ignores `Authorization`; header mode ignores the session cookie. A present but invalid credential in the configured transport returns `401` and never falls back to the other transport. Only the `Bearer` scheme (case-insensitive) is read; an empty or non-Bearer `Authorization` value counts as a missing SCJWT.
+The configured placement is authoritative. Cookie mode ignores `Authorization`; header mode ignores the session cookie. A present but invalid credential in the configured transport signs the request out (see [Security model](#security-model)) and never falls back to the other transport. Only the `Bearer` scheme (case-insensitive) is read; an empty or non-Bearer `Authorization` value counts as a missing SCJWT.
 
 `Access-Control-Expose-Headers` only lets a page that is already allowed to read the response see `set-auth-token`; it grants no cross-origin access by itself. Your CORS policy decides which origins may call the API and send `Authorization`.
 
@@ -206,11 +206,12 @@ The fingerprint constrains replay; it is not proof of device possession. User-Ag
 ## Security model
 
 - Signature, issuer, expiry, payload shape, session subject, lifecycle-aware session liveness (`internalAdapter.findSession`), database expiry, fingerprint, and configured custom claims are checked before native session injection.
-- Missing SCJWT falls through to ordinary Better Auth handling. A present invalid SCJWT returns Better Auth's standard `401 UNAUTHORIZED` response.
+- Missing SCJWT falls through to ordinary Better Auth handling. A present SCJWT that fails any check is treated like an invalid Better Auth session cookie: the before hook removes it and Better Auth's native session cookies from the request, which continues signed out. `/get-session` returns `null`, sign-in and sign-up work normally, and endpoints that require a session return Better Auth's own `401 UNAUTHORIZED`. A rejection never deletes or changes the backing session.
+- In cookie placement, a signed-out response clears the SCJWT and Better Auth's session cookies unless the request establishes a new session, so a browser holding a stale token recovers on its next Better Auth request. Route guards that call `auth.api.getSession` without forwarding its response headers cannot deliver this clearing. In header placement the server cannot clear a client's stored token; discard it when `/get-session` returns `null`.
 - Session deletion is immediate revocation; there is no SCJWT blocklist.
 - Storage outages fail closed: if the session row or `secondaryStorage` cannot be read, the request fails with a server error (`500`), not `401`, and no credential is issued. SCJWT never falls back from one store to the other.
-- Fingerprint mismatch returns `401` without deleting the session, preventing a mismatched bearer from terminating the shared session.
-- Custom-claim mismatch returns `401` without deleting the session.
+- A fingerprint mismatch signs the request out without deleting the session, so a mismatched bearer cannot terminate the shared session, not even through `/sign-out`.
+- A custom-claim mismatch signs the request out without deleting the session.
 - CSRF: cookie placement is an ambient credential, and Better Auth's origin check rejects state-changing requests from untrusted or missing `Origin` exactly as for native session cookies. Header placement is not ambient (a script must attach `Authorization`), so Better Auth does not origin-check Bearer requests; restrict callers with CORS. Better Auth disables its origin check when `NODE_ENV` is `test` unless `advanced.disableOriginCheck` is set to `false`.
 - Direct `auth.api` calls do not pass through Better Auth's HTTP router, so its origin and CSRF checks do not run; routes that forward browser headers to `auth.api` must validate `Origin` themselves (see Better Auth's [security reference](https://better-auth.com/docs/reference/security)).
 - Better Auth's `bearer()` plugin cannot be registered with `scjwt()`; initialization fails with `[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt()`. Both own the session transport, and in cookie placement `bearer()` would turn the native session token returned in sign-in and sign-up response bodies into an authenticated session without SCJWT's fingerprint and claim checks. Use `scjwt({ tokenPlacement: "header" })` for `Authorization: Bearer` clients.
@@ -218,9 +219,13 @@ The fingerprint constrains replay; it is not proof of device possession. User-Ag
 
 ## Migration
 
+### Invalid tokens are signed out instead of returning `401`
+
+Endpoints that do not require a session (such as `/get-session`, sign-in, sign-up, and sign-out) no longer answer `401` for an invalid, expired, revoked, or mismatched SCJWT. They continue signed out, and `/get-session` returns `null` with `200`. Clients that detected a dead token from a `401` on `/get-session` must check for a `null` session instead. Endpoints and guards that require a session still answer `401`.
+
 ### Tokens issued before the `remember` claim
 
-`remember` is a required claim. Tokens issued by earlier 0.1.x builds lack it and are rejected with `401`; users sign in again to receive a replacement. No database migration is involved, and there is no fallback that accepts the old shape.
+`remember` is a required claim. Tokens issued by earlier 0.1.x builds lack it and are rejected; requests carrying them are signed out, and users sign in again to receive a replacement. No database migration is involved, and there is no fallback that accepts the old shape.
 
 ### Configurations that also register `bearer()`
 
