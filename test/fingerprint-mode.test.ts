@@ -5,7 +5,7 @@ import { createAuthEndpoint } from "better-auth/api";
 import { deleteSessionCookie, parseSetCookieHeader } from "better-auth/cookies";
 import { decodeJwt } from "jose";
 import { scjwt } from "../src/plugin/index";
-import type { ScjwtFingerprintOptions } from "../src/plugin/types";
+import type { ScjwtFingerprintOptions, ScjwtOptions } from "../src/plugin/types";
 import {
 	TEST_BASE_URL,
 	TEST_SECRET,
@@ -29,16 +29,24 @@ interface AuthSetup {
 	db?: TestDB;
 	ipAddress?: NonNullable<BetterAuthOptions["advanced"]>["ipAddress"];
 	plugins?: BetterAuthPlugin[];
+	getCustomClaims?: ScjwtOptions["getCustomClaims"];
 }
 
-function createAuth({ placement = "cookie", fingerprint, db, ipAddress, plugins = [] }: AuthSetup = {}) {
+function createAuth({
+	placement = "cookie",
+	fingerprint,
+	db,
+	ipAddress,
+	plugins = [],
+	getCustomClaims,
+}: AuthSetup = {}) {
 	return betterAuth({
 		database: memoryAdapter(db ?? createMemoryDB()),
 		baseURL: TEST_BASE_URL,
 		secret: TEST_SECRET,
 		emailAndPassword: { enabled: true },
 		advanced: { ipAddress: ipAddress ?? { ipAddressHeaders: ["x-forwarded-for"] } },
-		plugins: [scjwt({ tokenPlacement: placement, fingerprint }), ...plugins],
+		plugins: [scjwt({ tokenPlacement: placement, fingerprint, getCustomClaims }), ...plugins],
 	});
 }
 type Auth = ReturnType<typeof createAuth>;
@@ -445,6 +453,27 @@ describe("dynamic fingerprint mode", () => {
 			expect(db.session).toHaveLength(0);
 			expect(deliveredToken(response, placement, client.cookieName)).toBeNull();
 		}
+	});
+
+	test("a failed re-bind keeps the completed response and the presented token", async () => {
+		let calls = 0;
+		const client = await signUp(
+			createAuth({
+				fingerprint: { mode: "dynamic" },
+				// Issuance and verification succeed; the re-bind's resolution fails once.
+				getCustomClaims: () => {
+					calls += 1;
+					if (calls === 3) throw new Error("claims backend unavailable");
+					return { plan: "pro" };
+				},
+			}),
+			"cookie",
+			"failed-rebind@example.com",
+			device("203.0.113.10"),
+		);
+		await expectMatch(client, await read(client, client.token, device("198.51.100.20")));
+		expect(calls).toBe(3);
+		await expectMatch(client, await read(client, client.token, device("203.0.113.10")));
 	});
 
 	test("a response that clears the session cookie is not re-bound", async () => {

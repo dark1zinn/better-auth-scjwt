@@ -165,7 +165,13 @@ export function createScjwtHooks(
 							!touchesTransport &&
 							!isFailedResult(ctx.context.returned)
 						) {
-							await reissueForCurrentDevice(ctx, options, state.sessionId, state.rebind);
+							try {
+								await reissueForCurrentDevice(ctx, options, state.sessionId, state.rebind);
+							} catch (error) {
+								// The request already succeeded and the presented token stays valid,
+								// so a failed re-bind only skips the replacement.
+								ctx.context.logger.error("[scjwt] could not re-bind the session token", error);
+							}
 						}
 						return;
 					}
