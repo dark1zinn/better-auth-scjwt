@@ -927,6 +927,38 @@ describe("invalid SCJWTs are signed out", () => {
 			expect(response.status).toBe(401);
 		}
 	});
+
+	test("header placement removes a rejected Bearer token from the endpoint's request headers", async () => {
+		const seen: Array<string | null> = [];
+		const echo = {
+			id: "authorization-echo",
+			endpoints: {
+				echoAuthorization: createAuthEndpoint(
+					"/echo-authorization",
+					{ method: "GET" },
+					async (ctx) => {
+						seen.push(ctx.headers?.get("authorization") || null);
+						return ctx.json({ ok: true });
+					},
+				),
+			},
+		} satisfies BetterAuthPlugin;
+		const auth = betterAuth({
+			database: memoryAdapter(createMemoryDB()),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [scjwt({ tokenPlacement: "header" }), echo],
+		});
+		const issued = await signUpWithScjwt(auth, "rejected-bearer@example.com");
+		const rejected = present("header", issued.cookieName, issued.token, OTHER_DEVICE);
+		const response = await auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/echo-authorization`, { headers: rejected }),
+		);
+		expect(response.status).toBe(200);
+		await auth.api.echoAuthorization({ headers: rejected });
+		expect(seen).toEqual([null, null]);
+	});
 });
 
 function withOrigin(headers: Headers): Headers {

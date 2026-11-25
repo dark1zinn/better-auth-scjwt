@@ -461,7 +461,9 @@ function withoutSessionCredentials(
 		stripNativeSessionCookies(sourceHeaders, authCookies) ??
 		new Headers(sourceHeaders);
 	if (tokenPlacement === "header") {
-		headers.delete("authorization");
+		// Better Auth merges hook headers with `set`, so a deleted key would
+		// survive; an empty value counts as a missing credential.
+		headers.set("authorization", "");
 	}
 	return headers;
 }
