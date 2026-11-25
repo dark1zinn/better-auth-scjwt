@@ -114,6 +114,8 @@ With `secondaryStorage`, `findSession` consults the secondary store first. A ses
 
 Better Auth's `session.cookieCache` stores a signed `session_data` snapshot in the browser so `getSession` can skip the session store until the snapshot expires. Under SCJWT the snapshot is never the server-side source of truth: for every request with a verified SCJWT, the before hook removes `session_data` (and its chunks) from the request it hands to Better Auth, so `/get-session`, guards built on `auth.api.getSession` such as `@thallesp/nestjs-better-auth`, and other endpoints read the current session and user from the store. Role downgrades, profile changes, and session-field updates therefore take effect on the next request instead of after `cookieCache.maxAge`. Better Auth may still emit `session_data` in responses, and client-side code that reads it (for example a UI session store) can show older data until it refreshes; server authorization is unaffected. A revoked session is signed out before any endpoint runs, with or without a snapshot, and in cookie placement the response clears the snapshot together with the SCJWT.
 
+In cookie placement the snapshot Better Auth emits contains the session row, including its `ipAddress`, `userAgent`, and native `token`. Better Auth's `compact` and `jwt` strategies sign it but do not encrypt it, so anything that can read the browser's cookie store can read those values, even though `fp` reveals no signal. Use `cookieCache: { strategy: "jwe" }` when that matters. The native token in the snapshot does not authenticate under SCJWT.
+
 ### Header placement
 
 Header placement emits:
