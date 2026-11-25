@@ -253,7 +253,7 @@ The fingerprint constrains replay; it is not proof of device possession. User-Ag
 
 ### From `fingerprintMode`
 
-`scjwt({ fingerprintMode })` is replaced by `scjwt({ fingerprint: { mode } })`, and the old option fails at startup with `[scjwt] fingerprintMode was replaced by fingerprint.mode`. `"strict"` keeps its meaning and its exact-address default. `"ip-only"` has no equivalent: use `"loose"` to tolerate browser changes, or `"dynamic"`, optionally with `ipv4Prefix`/`ipv6Prefix`, to tolerate one change at a time.
+`scjwt({ fingerprintMode })` is replaced by `scjwt({ fingerprint: { mode } })`, and the old option fails at startup with `[scjwt] fingerprintMode was replaced by fingerprint.mode`. `"strict"` keeps its meaning and its exact-address default. `"ip-only"` has no equivalent: no mode keeps the IP binding strict while ignoring browser changes. `"ip-only"` signed out any change of address and ignored the browser; `"loose"` tolerates network changes too, so a deployment that relied on `"ip-only"` for IP binding loses it there. The closest option is `"dynamic"`, optionally with `ipv4Prefix`/`ipv6Prefix`: it tolerates a User-Agent change on its own, but also a network change on its own, and rejects any platform change. Keep `"strict"` if the IP binding matters more than browser changes.
 
 ### Tokens issued before keyed fingerprints
 
