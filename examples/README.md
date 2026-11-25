@@ -17,8 +17,8 @@ Better Auth owns the `/api/auth/*` routes.
 
 ### Source layout
 
-- `src/auth.factory.ts` — import-safe `createAuth(...)`: opens the SQLite file, enables email/password, and registers `[scjwt(), ...additionalPlugins]`. SCJWT is always first so session-dependent plugin hooks see the SCJWT-resolved session.
-- `src/auth.ts` — the production singleton: reads `BETTER_AUTH_DATABASE`, `BETTER_AUTH_URL`, and `BETTER_AUTH_SECRET` and calls the factory with no additional plugins. The runnable application is SCJWT-only.
+- `src/auth.factory.ts` — import-safe `createAuth(...)`: opens the SQLite file, enables email/password, and registers `[scjwt(options.scjwt), ...additionalPlugins]`; profiles may also pass Better Auth `advanced` settings. SCJWT is always first so session-dependent plugin hooks see the SCJWT-resolved session.
+- `src/auth.ts` — the production singleton: reads `BETTER_AUTH_DATABASE`, `BETTER_AUTH_URL`, and `BETTER_AUTH_SECRET` and calls the factory with no additional plugins and default SCJWT options (cookie placement, strict fingerprints). The runnable application is SCJWT-only.
 - `src/app-module.metadata.ts` — module wiring shared by `AppModule` and the E2E profiles.
 
 ### E2E profiles
@@ -36,6 +36,7 @@ Each profile file builds its own Better Auth instance through the factory, a uni
 | `email-otp` | `emailOTP()` | OTP sign-in/auto-registration, attempts, replay, expiry, resend strategies, verification, password reset revocation, two-stage email change |
 | `combined-plugins` | `admin`, `captcha`, `username`, `emailOTP`, `i18n` | All of the above composed in one application |
 | `two-factor` | `twoFactor({ otpOptions })`, `username`, `admin` | OTP enrollment and disabling rotate the session; password and username sign-in stop at the challenge with no live session cookie; wrong and expired codes and a replayed challenge issue nothing; the verified session is a normal SCJWT session visible to Admin and ended by sign-out |
+| `fingerprint` | none; `scjwt({ fingerprint: { mode } })` per case | `strict`: a changed User-Agent answers `401` on `/me`, a signed-out read clears the cookie, and signing in again recovers; `dynamic`: a same-`/24` address keeps the token, another network re-binds it with the same `sid` (delivered on the next Better Auth response, not by the guard), and a network plus User-Agent change signs out; `loose`: every change re-binds |
 
 The `two-factor` profile covers the OTP method only, with codes captured in memory by `sendOTP`. TOTP, backup codes, trusted devices, passkeys, and OAuth-provider MFA are not exercised. Header placement during a pending challenge is covered by the root suite (`test/lifecycle-finalization.test.ts`), where the challenge cookie is the only cookie the client must return.
 
