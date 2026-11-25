@@ -601,4 +601,74 @@ describe("terminal SCJWT session finalizer", () => {
 		const session = await requestSession(auth, bearerHeaders(token ?? ""));
 		expect(await session.json()).toMatchObject({ user: { email } });
 	});
+
+	test("a stale SCJWT does not erase the dontRemember marker of a pending two-factor sign-in", async () => {
+		const codes = new Map<string, string>();
+		const db = { ...createMemoryDB(), twoFactor: [] };
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [
+				scjwt(),
+				twoFactor({
+					otpOptions: {
+						sendOTP: async ({ user, otp }) => {
+							codes.set(user.id, otp);
+						},
+					},
+				}),
+			],
+		});
+		const email = "cookie-two-factor-nonpersistent@example.com";
+		const issued = await signUpWithScjwt(auth, email);
+		const post = (path: string, cookie: string, body: object) =>
+			auth.handler(
+				new Request(`${TEST_BASE_URL}/api/auth${path}`, {
+					method: "POST",
+					headers: { ...STABLE_HEADERS, "content-type": "application/json", cookie },
+					body: JSON.stringify(body),
+				}),
+			);
+		const sessionCookie = (token: string) =>
+			`${issued.cookieName}=${encodeURIComponent(token)}`;
+		/** Cookies a browser keeps after `response`: live entries only. */
+		const liveCookies = (response: Response) =>
+			[...parseSetCookieHeader(response.headers.get("set-cookie") ?? "")]
+				.filter(([, attributes]) => attributes.value && attributes["max-age"] !== 0)
+				.map(([name, attributes]) => `${name}=${encodeURIComponent(attributes.value)}`)
+				.join("; ");
+
+		const enabled = await post("/two-factor/enable", sessionCookie(issued.token), {
+			password: PASSWORD,
+			method: "otp",
+		});
+		expect(enabled.status).toBe(200);
+		const current = parseSetCookieHeader(enabled.headers.get("set-cookie") ?? "").get(
+			issued.cookieName,
+		)?.value;
+		expect((await post("/revoke-sessions", sessionCookie(current ?? ""), {})).status).toBe(200);
+
+		// The browser still holds the now revoked SCJWT when it signs in again.
+		const pending = await post("/sign-in/email", sessionCookie(current ?? ""), {
+			email,
+			password: PASSWORD,
+			rememberMe: false,
+		});
+		expect(await pending.json()).toMatchObject({ twoFactorRedirect: true });
+		const challenge = liveCookies(pending);
+		expect(challenge).toContain("dont_remember=");
+
+		expect((await post("/two-factor/send-otp", challenge, {})).status).toBe(200);
+		const verified = await post("/two-factor/verify-otp", challenge, {
+			code: codes.get(rowAt(db.user).id ?? ""),
+		});
+		expect(verified.status).toBe(200);
+		const cookie = parseSetCookieHeader(verified.headers.get("set-cookie") ?? "").get(
+			issued.cookieName,
+		);
+		expect(decodeJwt(cookie?.value ?? "").remember).toBe(false);
+		expect(cookie?.["max-age"]).toBeUndefined();
+	});
 });

@@ -69,7 +69,7 @@ For every successful endpoint with `ctx.context.newSession`:
 
 Returned API errors and non-2xx `Response` values do not receive a replacement token. Better Auth `session.updateAge` is the only refresh policy.
 
-For a request the before hook signed out that establishes no new session, cookie placement clears the SCJWT and Better Auth's session cookies; header placement emits nothing. The before hook records its outcome per request, keyed by the request's `AuthContext`, which Better Auth shares between a request's before and after hooks.
+For a request the before hook signed out that establishes no new session, cookie placement expires the SCJWT and Better Auth's session-token, session-data, and `dontRemember` cookies, except any the response already sets (for example the live `dontRemember` marker of a pending two-factor sign-in); header placement emits nothing. The before hook records its outcome per request, keyed by the request's `AuthContext`, which Better Auth shares between a request's before and after hooks.
 
 For a request authenticated under a tolerated device change that establishes no new session, the finalizer re-binds the presented token when the result succeeded, the response neither sets nor clears the session cookie nor carries `set-auth-token`, and `internalAdapter.findSession` still returns the session. The replacement keeps the session ID, `exp`, and `remember`, re-resolves custom claims, and carries digests of the current request; cookie placement sets it as the session cookie (no `Max-Age` for `remember: false`), header placement as `set-auth-token`.
 

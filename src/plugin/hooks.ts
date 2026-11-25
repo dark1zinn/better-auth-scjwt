@@ -158,7 +158,7 @@ export function createScjwtHooks(
 						}
 						if (state?.kind === "signed-out" && options.tokenPlacement === "cookie") {
 							// The browser cannot drop an HttpOnly SCJWT on its own.
-							clearSessionTransport(ctx);
+							expireStaleSessionCookies(ctx);
 						} else if (
 							state?.kind === "authenticated" &&
 							state.rebind &&
@@ -499,6 +499,24 @@ function clearSessionTransport(
 	expireCookie(ctx, ctx.context.authCookies.sessionData);
 	expireCookie(ctx, ctx.context.authCookies.dontRememberToken);
 	ctx.context.responseHeaders?.delete(SET_AUTH_TOKEN_HEADER);
+}
+
+/**
+ * Clears a rejected SCJWT from the browser: expires the session-token,
+ * session-data, and `dontRemember` cookies unless the response already sets
+ * that cookie itself. Better Auth may legitimately keep some of them on a
+ * signed-out request, such as the live `dontRemember` marker a pending
+ * two-factor sign-in needs for its verification step.
+ */
+function expireStaleSessionCookies(
+	ctx: GenericEndpointContext & { context: { responseHeaders?: Headers } },
+): void {
+	const { sessionToken, sessionData, dontRememberToken } = ctx.context.authCookies;
+	for (const cookie of [sessionToken, sessionData, dontRememberToken]) {
+		if (!setsCookie(ctx.context.responseHeaders, cookie.name)) {
+			expireCookie(ctx, cookie);
+		}
+	}
 }
 
 /**
