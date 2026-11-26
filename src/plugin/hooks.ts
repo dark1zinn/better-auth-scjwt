@@ -38,7 +38,7 @@ import type {
  */
 type RequestState =
 	| { kind: "authenticated"; sessionId: string; rebind: Rebind | null }
-	| { kind: "signed-out" };
+	| { kind: "signed-out"; sessionDataChunks: string[] };
 
 /**
  * A token accepted under a tolerated device change, re-issued for the current
@@ -102,7 +102,14 @@ export function createScjwtHooks(
 						// Like an invalid Better Auth session cookie: the request continues
 						// without a session, so sign-in and sign-up still work and
 						// session-protected endpoints answer 401 on their own.
-						requestStates.set(ctx.context, { kind: "signed-out" });
+						const chunkPrefix = `${authCookies.sessionData.name}.`;
+						// The endpoint receives sanitized headers, so retain the names here.
+						const sessionDataChunks = options.tokenPlacement === "cookie"
+							? [...parseCookies(sourceHeaders.get("cookie") ?? "").keys()].filter(
+								(name) => name.startsWith(chunkPrefix) && /^(0|[1-9][0-9]*)$/.test(name.slice(chunkPrefix.length)),
+							)
+							: [];
+						requestStates.set(ctx.context, { kind: "signed-out", sessionDataChunks });
 						return {
 							context: {
 								headers: withoutSessionCredentials(
@@ -158,7 +165,7 @@ export function createScjwtHooks(
 						}
 						if (state?.kind === "signed-out" && options.tokenPlacement === "cookie") {
 							// The browser cannot drop an HttpOnly SCJWT on its own.
-							expireStaleSessionCookies(ctx);
+							expireStaleSessionCookies(ctx, state.sessionDataChunks, true);
 						} else if (
 							state?.kind === "authenticated" &&
 							state.rebind &&
@@ -249,6 +256,9 @@ export function createScjwtHooks(
 						options.tokenPlacement,
 						ctx.context.authCookies,
 					);
+					if (state?.kind === "signed-out" && state.sessionDataChunks.length) {
+						expireStaleSessionCookies(ctx, state.sessionDataChunks, false);
+					}
 				}),
 			},
 		],
@@ -509,18 +519,27 @@ function clearSessionTransport(
 
 /**
  * Clears a rejected SCJWT from the browser: expires the session-token,
- * session-data, and `dontRemember` cookies unless the response already sets
- * that cookie itself. Better Auth may legitimately keep some of them on a
+ * session-data (including its chunks), and `dontRemember` cookies unless
+ * the response already sets that cookie itself. If a new session was issued,
+ * only clean up leftover chunks. Better Auth may legitimately keep some of them on a
  * signed-out request, such as the live `dontRemember` marker a pending
  * two-factor sign-in needs for its verification step.
  */
 function expireStaleSessionCookies(
 	ctx: GenericEndpointContext & { context: { responseHeaders?: Headers } },
+	sessionDataChunks: string[],
+	clearBaseCookies: boolean,
 ): void {
 	const { sessionToken, sessionData, dontRememberToken } = ctx.context.authCookies;
-	for (const cookie of [sessionToken, sessionData, dontRememberToken]) {
-		if (!setsCookie(ctx.context.responseHeaders, cookie.name)) {
-			expireCookie(ctx, cookie);
+	const cookies = clearBaseCookies ? [sessionToken, sessionData, dontRememberToken] : [];
+	for (const name of sessionDataChunks) {
+		cookies.push({ name, attributes: sessionData.attributes });
+	}
+	for (const { name, attributes } of cookies) {
+		if (!setsCookie(ctx.context.responseHeaders, name)) {
+			// Better Auth's expireCookie also removes pending Set-Cookie entries
+			// for descendants of this name. Append an expiration for this name only.
+			ctx.setCookie(name, "", { ...attributes, maxAge: 0 });
 		}
 	}
 }

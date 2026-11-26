@@ -81,6 +81,23 @@ function browserHeaders(cookies: Map<string, string>): Headers {
 	return headers;
 }
 
+/** Applies response cookies in order, including their expiration instructions. */
+function applyResponseCookies(cookies: Map<string, string>, response: Response): void {
+	for (const header of response.headers.getSetCookie()) {
+		for (const [name, attributes] of parseSetCookieHeader(header)) {
+			const maxAge = attributes["max-age"];
+			const expired = maxAge !== undefined
+				? maxAge <= 0
+				: attributes.expires !== undefined && attributes.expires.getTime() <= Date.now();
+			if (expired) {
+				cookies.delete(name);
+			} else {
+				cookies.set(name, attributes.value);
+			}
+		}
+	}
+}
+
 async function readSession(auth: Auth, headers: Headers): Promise<SessionBody> {
 	const response = await requestSession(auth, headers);
 	expect(response.status).toBe(200);
@@ -133,6 +150,64 @@ describe("cookie cache under SCJWT", () => {
 			expect({ name, maxAge: cleared.get(name)?.["max-age"] }).toEqual({ name, maxAge: 0 });
 		}
 		await expectSignedOut(response);
+	});
+
+	test("revoking a session removes its chunked snapshot from the browser", async () => {
+		const db = createMemoryDB();
+		const auth = createAuth(db);
+		const context = await auth.$context;
+		const { sessionData } = context.authCookies;
+		const { response: issued, cookies } = await signUp(auth, "revoked-chunks@example.com", {
+			bio: "b".repeat(6000),
+		});
+		expect(cookies.has(`${sessionData.name}.1`)).toBe(true);
+		cookies.set("preferences", "keep");
+		await context.internalAdapter.deleteSession(rowAt(db.session).token);
+
+		const response = await requestSession(auth, browserHeaders(cookies));
+		await expectSignedOut(response);
+		const original = parseSetCookieHeader(issued.headers.get("set-cookie") ?? "");
+		const cleared = parseSetCookieHeader(response.headers.get("set-cookie") ?? "");
+		for (const [name, attributes] of original) {
+			if (!name.startsWith(`${sessionData.name}.`)) continue;
+			expect(cleared.get(name)?.path).toBe(attributes.path);
+			expect(cleared.get(name)?.domain).toBe(attributes.domain);
+		}
+		applyResponseCookies(cookies, response);
+		expect([...cookies.keys()]).toEqual(["preferences"]);
+		expect(cookies.get("preferences")).toBe("keep");
+	});
+
+	test("sign-in with a revoked SCJWT keeps the new session and removes leftover chunks", async () => {
+		const db = createMemoryDB();
+		const auth = createAuth(db);
+		const context = await auth.$context;
+		const { sessionData, sessionToken } = context.authCookies;
+		const old = await signUp(auth, "old-chunks@example.com", { bio: "b".repeat(10000) });
+		const current = await signUp(auth, "new-chunks@example.com", { bio: "c".repeat(4000) });
+		const oldToken = old.cookies.get(sessionToken.name);
+		const replacedChunk = `${sessionData.name}.0`;
+		const staleChunk = `${sessionData.name}.2`;
+		expect(old.cookies.has(staleChunk)).toBe(true);
+		expect(current.cookies.has(replacedChunk)).toBe(true);
+		expect(current.cookies.has(staleChunk)).toBe(false);
+		await context.internalAdapter.deleteSession(rowAt(db.session).token);
+
+		const headers = browserHeaders(old.cookies);
+		headers.set("content-type", "application/json");
+		const response = await auth.handler(new Request(`${TEST_BASE_URL}/api/auth/sign-in/email`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ email: "new-chunks@example.com", password: PASSWORD }),
+		}));
+		expect(response.status).toBe(200);
+		const oldChunk = old.cookies.get(replacedChunk);
+		applyResponseCookies(old.cookies, response);
+		expect(old.cookies.has(staleChunk)).toBe(false);
+		expect(old.cookies.get(replacedChunk)).toBeTruthy();
+		expect(old.cookies.get(replacedChunk)).not.toBe(oldChunk);
+		expect(old.cookies.get(sessionToken.name)).not.toBe(oldToken);
+		expect((await readSession(auth, browserHeaders(old.cookies))).user.id).toBe(rowAt(db.user, 1).id);
 	});
 
 	test("another user's snapshot cannot change who the SCJWT authenticates", async () => {
