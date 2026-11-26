@@ -17,12 +17,13 @@ import {
 	TEST_SECRET,
 	createCookieHeaders,
 	createMemoryDB,
+	expectSignedOut,
 	requestSession,
 	rowAt,
 	signUpWithScjwt,
 } from "./helpers/native-auth";
 
-const FINGERPRINT = "a".repeat(64);
+const FINGERPRINT = { ip: "a".repeat(32), ua: "b".repeat(32), pf: "c".repeat(32) };
 
 function tokenParts(customClaims?: Record<string, never | string | number | boolean | null>) {
 	const issuedAt = Math.floor(Date.now() / 1000);
@@ -106,7 +107,7 @@ describe("custom SCJWT claims", () => {
 			auth,
 			createCookieHeaders(issued.cookieName, issued.token),
 		);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 		expect(db.session).toHaveLength(1);
 	});
 
@@ -153,7 +154,7 @@ describe("custom SCJWT claims", () => {
 			auth,
 			createCookieHeaders(issued.cookieName, issued.token),
 		);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 		expect(db.session).toHaveLength(1);
 	});
 

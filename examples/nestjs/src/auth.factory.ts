@@ -6,7 +6,7 @@ import {
   type BetterAuthOptions,
   type BetterAuthPlugin,
 } from 'better-auth';
-import { scjwt } from 'better-auth-scjwt';
+import { scjwt, type ScjwtOptions } from 'better-auth-scjwt';
 
 export interface CreateAuthOptions<
   AdditionalPlugins extends BetterAuthPlugin[],
@@ -21,6 +21,10 @@ export interface CreateAuthOptions<
   >;
   user?: BetterAuthOptions['user'];
   session?: BetterAuthOptions['session'];
+  /** Better Auth `advanced` settings, for example IP resolution. */
+  advanced?: BetterAuthOptions['advanced'];
+  /** Options for `scjwt()`; defaults to cookie placement and strict fingerprints. */
+  scjwt?: ScjwtOptions;
 }
 
 /**
@@ -43,6 +47,7 @@ export function createAuth<const AdditionalPlugins extends BetterAuthPlugin[]>(
     emailAndPassword: { enabled: true, ...options.emailAndPassword },
     user: options.user,
     session: options.session,
-    plugins: [scjwt(), ...options.additionalPlugins],
+    advanced: options.advanced,
+    plugins: [scjwt(options.scjwt), ...options.additionalPlugins],
   });
 }

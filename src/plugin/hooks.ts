@@ -1,26 +1,28 @@
 import type { GenericEndpointContext } from "@better-auth/core";
-import type { AuthContext, BetterAuthPlugin, Session } from "better-auth";
-import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
+import type { AuthContext, BetterAuthPlugin, Session, User } from "better-auth";
+import { createAuthMiddleware, isAPIError } from "better-auth/api";
 import { expireCookie, parseCookies } from "better-auth/cookies";
 import { serializeSignedCookie } from "better-call";
-import { decodeJwt } from "jose";
 import { NONPERSISTENT_SESSION_SECONDS } from "./constants";
-import { computeFingerprint } from "./fingerprint";
+import { assessFingerprint, computeFingerprint } from "./fingerprint";
 import {
 	getCustomClaims,
+	getSigningSecret,
+	getVerificationSecret,
 	jsonValuesEqual,
 	signJwtFromParts,
 	validateCustomClaims,
 	verifyJwt,
 	type CustomClaims,
 } from "./jwt";
-import { getRequestFingerprintInput } from "./request-context";
+import { getFingerprintSignals } from "./request-context";
 import {
 	deliverSessionToken,
 	hasLiveSetCookie,
 	isHeaderOnlyNativeCookie,
 	removePendingSessionTransport,
 	SET_AUTH_TOKEN_HEADER,
+	setsCookie,
 } from "./token-deliver";
 import { extractToken } from "./token-extract";
 import type {
@@ -30,12 +32,35 @@ import type {
 } from "./types";
 
 /**
+ * What the before hook decided about the presented SCJWT, read by the session
+ * finalizer of the same request. Keyed by the request's `AuthContext`, which
+ * Better Auth shares between a request's before and after hooks.
+ */
+type RequestState =
+	| { kind: "authenticated"; sessionId: string; rebind: Rebind | null }
+	| { kind: "signed-out"; sessionDataChunks: string[] };
+
+/**
+ * A token accepted under a tolerated device change, re-issued for the current
+ * signals once the request succeeds. The replacement keeps the presented
+ * `exp` and `remember`, so a rebind never extends a session.
+ */
+interface Rebind {
+	nativeToken: string;
+	expiresAt: number;
+	remember: boolean;
+}
+
+const requestStates = new WeakMap<AuthContext, RequestState>();
+
+/**
  * Builds SCJWT's universal hooks. The before hook authenticates a presented
  * SCJWT through Better Auth's session lifecycle and injects the native
- * session cookie. The after hook is the session finalizer: `scjwt()` installs
- * it on an internal plugin appended after every registered plugin, so it
- * observes the final `ctx.context.newSession` and result and issues a
- * replacement SCJWT only when the request ultimately succeeds.
+ * session cookie; a presented SCJWT that cannot authenticate is removed so
+ * the request continues signed out. The after hook is the session finalizer:
+ * `scjwt()` installs it on an internal plugin appended after every registered
+ * plugin, so it observes the final `ctx.context.newSession` and result and
+ * issues a replacement SCJWT only when the request ultimately succeeds.
  */
 export function createScjwtHooks(
 	options: ResolvedScjwtOptions,
@@ -47,16 +72,17 @@ export function createScjwtHooks(
 				handler: createAuthMiddleware(async (ctx) => {
 					const sourceHeaders =
 						ctx.request?.headers ?? ctx.headers ?? new Headers();
+					const authCookies = ctx.context.authCookies;
 					const token = extractToken({
 						tokenPlacement: options.tokenPlacement,
-						cookieName: ctx.context.authCookies.sessionToken.name,
+						cookieName: authCookies.sessionToken.name,
 						headers: sourceHeaders,
 					});
 					if (!token) {
 						if (options.tokenPlacement === "header") {
 							const headers = stripNativeSessionCookies(
 								sourceHeaders,
-								ctx.context.authCookies,
+								authCookies,
 							);
 							if (headers) {
 								return { context: { headers } };
@@ -65,58 +91,48 @@ export function createScjwtHooks(
 						return;
 					}
 
-					const payload = await verifyRequestToken(
+					const authenticated = await authenticateToken(
 						ctx.context,
+						options,
 						token,
-						options.getCustomClaims !== undefined,
-					);
-					const { session, user, nativeToken } =
-						await resolveAuthoritativeSession(ctx.context, payload.sid);
-
-					const sessionExpiresAt = Math.floor(
-						new Date(session.expiresAt).getTime() / 1000,
-					);
-					const maximumTokenExpiry = Math.min(
-						sessionExpiresAt,
-						payload.iat + tokenLifetime(payload.remember, ctx.context),
-					);
-					if (
-						sessionExpiresAt <= Math.floor(Date.now() / 1000) ||
-						payload.exp > maximumTokenExpiry ||
-						payload.sub !== `user:${session.userId}`
-					) {
-						unauthorized();
-					}
-
-					const requestFingerprint = getRequestFingerprintInput(
 						sourceHeaders,
-						ctx.context.options,
-						options.fingerprintMode,
+						ctx.request,
 					);
-					const expectedFingerprint = await computeFingerprint(
-						requestFingerprint.ip,
-						requestFingerprint.ua,
-						requestFingerprint.platform,
-					);
-					if (payload.fp !== expectedFingerprint) {
-						unauthorized();
+					if (!authenticated) {
+						// Like an invalid Better Auth session cookie: the request continues
+						// without a session, so sign-in and sign-up still work and
+						// session-protected endpoints answer 401 on their own.
+						const chunkPrefix = `${authCookies.sessionData.name}.`;
+						// The endpoint receives sanitized headers, so retain the names here.
+						const sessionDataChunks = options.tokenPlacement === "cookie"
+							? [...parseCookies(sourceHeaders.get("cookie") ?? "").keys()].filter(
+								(name) => name.startsWith(chunkPrefix) && /^(0|[1-9][0-9]*)$/.test(name.slice(chunkPrefix.length)),
+							)
+							: [];
+						requestStates.set(ctx.context, { kind: "signed-out", sessionDataChunks });
+						return {
+							context: {
+								headers: withoutSessionCredentials(
+									sourceHeaders,
+									authCookies,
+									options.tokenPlacement,
+								),
+							},
+						};
 					}
 
-					if (options.getCustomClaims) {
-						const expectedClaims = await resolveCustomClaims(options, {
-							session,
-							user,
-							request: ctx.request,
-						});
-						if (!jsonValuesEqual(getCustomClaims(payload), expectedClaims)) {
-							unauthorized();
-						}
-					}
-
+					const { session, user, nativeToken, payload, rebind } = authenticated;
 					ctx.context.session = { session, user };
+					requestStates.set(ctx.context, {
+						kind: "authenticated",
+						sessionId: session.id,
+						rebind: rebind
+							? { nativeToken, expiresAt: payload.exp, remember: payload.remember }
+							: null,
+					});
 					const headers = await buildAuthenticatedRequestHeaders(
 						sourceHeaders,
-						ctx.context.authCookies,
+						authCookies,
 						ctx.context.secret,
 						nativeToken,
 						payload.remember,
@@ -129,31 +145,48 @@ export function createScjwtHooks(
 			{
 				matcher: () => true,
 				handler: createAuthMiddleware(async (ctx) => {
+					const state = requestStates.get(ctx.context);
+					requestStates.delete(ctx.context);
 					const newSession = ctx.context.newSession;
 					if (!newSession) {
+						const pending = ctx.context.responseHeaders;
+						const sessionCookieName = ctx.context.authCookies.sessionToken.name;
+						// Decided before the cleanup below: a response that sets or clears
+						// the session cookie or delivers a token already speaks for the
+						// session, so it is never re-bound.
+						const touchesTransport =
+							setsCookie(pending, sessionCookieName) ||
+							pending?.has(SET_AUTH_TOKEN_HEADER) === true;
 						// A later hook withdrew the session (for example a pending two-factor
 						// challenge): drop the live native credential written for it so it
 						// neither leaks nor overwrites the SCJWT the client already holds.
-						const pending = ctx.context.responseHeaders;
-						if (
-							pending &&
-							hasLiveSetCookie(pending, ctx.context.authCookies.sessionToken.name)
-						) {
+						if (pending && hasLiveSetCookie(pending, sessionCookieName)) {
 							removePendingSessionTransport(pending, ctx.context.authCookies);
+						}
+						if (state?.kind === "signed-out" && options.tokenPlacement === "cookie") {
+							// The browser cannot drop an HttpOnly SCJWT on its own.
+							expireStaleSessionCookies(ctx, state.sessionDataChunks, true);
+						} else if (
+							state?.kind === "authenticated" &&
+							state.rebind &&
+							!touchesTransport &&
+							!isFailedResult(ctx.context.returned)
+						) {
+							try {
+								await reissueForCurrentDevice(ctx, options, state.sessionId, state.rebind);
+							} catch (error) {
+								// The request already succeeded and the presented token stays valid,
+								// so a failed re-bind only skips the replacement.
+								ctx.context.logger.error("[scjwt] could not re-bind the session token", error);
+							}
 						}
 						return;
 					}
-					const returned = ctx.context.returned;
-					if (
-						(isAPIError(returned) && returned.statusCode >= 400) ||
-						(returned instanceof Response && returned.status >= 400)
-					) {
-						const presentedSessionId = readPresentedSessionId(
-							options,
-							ctx.context.authCookies.sessionToken.name,
-							ctx.request?.headers ?? ctx.headers,
-						);
-						if (presentedSessionId === newSession.session.id) {
+					if (isFailedResult(ctx.context.returned)) {
+						if (
+							state?.kind === "authenticated" &&
+							state.sessionId === newSession.session.id
+						) {
 							// Only the presented session was refreshed: keep its SCJWT valid
 							// and drop the replacement instead of logging the client out.
 							if (ctx.context.responseHeaders) {
@@ -169,10 +202,10 @@ export function createScjwtHooks(
 					}
 					const headers =
 						ctx.request?.headers ?? ctx.headers ?? new Headers();
-					const input = getRequestFingerprintInput(
+					const input = getFingerprintSignals(
 						headers,
 						ctx.context.options,
-						options.fingerprintMode,
+						options.fingerprint,
 					);
 					const remember = !hasLiveSetCookie(
 						ctx.context.responseHeaders,
@@ -201,9 +234,8 @@ export function createScjwtHooks(
 							issuer: ctx.context.baseURL,
 							userId: newSession.session.userId,
 							fingerprint: await computeFingerprint(
-								input.ip,
-								input.ua,
-								input.platform,
+								getSigningSecret(ctx.context.secretConfig).secret,
+								input,
 							),
 							sessionId: newSession.session.id,
 							expiresAt,
@@ -224,10 +256,88 @@ export function createScjwtHooks(
 						options.tokenPlacement,
 						ctx.context.authCookies,
 					);
+					if (state?.kind === "signed-out" && state.sessionDataChunks.length) {
+						expireStaleSessionCookies(ctx, state.sessionDataChunks, false);
+					}
 				}),
 			},
 		],
 	};
+}
+
+interface AuthenticatedToken {
+	session: Session & Record<string, unknown>;
+	user: User & Record<string, unknown>;
+	nativeToken: string;
+	payload: ScjwtJwtPayload;
+	/** The device changed within the mode's tolerance; re-issue on success. */
+	rebind: boolean;
+}
+
+/**
+ * Authenticates a presented SCJWT: signature, issuer and claims, then the
+ * session through Better Auth's lifecycle, the effective expiry, subject,
+ * device fingerprint and custom claims. Returns `null` when the token cannot
+ * authenticate; storage and resolver failures propagate.
+ */
+async function authenticateToken(
+	context: AuthContext,
+	options: ResolvedScjwtOptions,
+	token: string,
+	headers: Headers,
+	request: Request | undefined,
+): Promise<AuthenticatedToken | null> {
+	const payload = await verifyRequestToken(
+		context,
+		token,
+		options.getCustomClaims !== undefined,
+	);
+	if (!payload) {
+		return null;
+	}
+	const resolved = await resolveAuthoritativeSession(context, payload.sid);
+	if (!resolved) {
+		return null;
+	}
+	const { session, user, nativeToken } = resolved;
+
+	const sessionExpiresAt = Math.floor(
+		new Date(session.expiresAt).getTime() / 1000,
+	);
+	const maximumTokenExpiry = Math.min(
+		sessionExpiresAt,
+		payload.iat + tokenLifetime(payload.remember, context),
+	);
+	if (
+		sessionExpiresAt <= Math.floor(Date.now() / 1000) ||
+		payload.exp > maximumTokenExpiry ||
+		payload.sub !== `user:${session.userId}`
+	) {
+		return null;
+	}
+
+	// Digests are keyed with the secret that signed the token, so rotating
+	// Better Auth's secret never looks like a device change.
+	const current = await computeFingerprint(
+		getVerificationSecret(context.secretConfig, token),
+		getFingerprintSignals(headers, context.options, options.fingerprint),
+	);
+	const assessment = assessFingerprint(options.fingerprint.mode, payload.fp, current);
+	if (assessment === "reject") {
+		return null;
+	}
+
+	if (options.getCustomClaims) {
+		const expectedClaims = await resolveCustomClaims(options, {
+			session,
+			user,
+			request,
+		});
+		if (!jsonValuesEqual(getCustomClaims(payload), expectedClaims)) {
+			return null;
+		}
+	}
+	return { session, user, nativeToken, payload, rebind: assessment === "rebind" };
 }
 
 /**
@@ -239,32 +349,76 @@ function tokenLifetime(remember: boolean, context: AuthContext): number {
 	return remember ? context.sessionConfig.expiresIn : NONPERSISTENT_SESSION_SECONDS;
 }
 
+/** Whether the endpoint failed: an API error or a `Response` with status 400 or higher. */
+function isFailedResult(returned: unknown): boolean {
+	return (
+		(isAPIError(returned) && returned.statusCode >= 400) ||
+		(returned instanceof Response && returned.status >= 400)
+	);
+}
+
 /**
- * Session id of the SCJWT presented in the configured transport. The before
- * hook has already verified it when the request reaches the after hooks.
+ * Re-issues the presented session's SCJWT for the current request's device
+ * signals after a tolerated change (`dynamic` or `loose` mode). The session
+ * must still be live. The replacement keeps the presented expiry and
+ * `remember` policy and re-resolves custom claims, so a rebind neither
+ * extends a session nor carries stale claims.
  */
-function readPresentedSessionId(
+async function reissueForCurrentDevice(
+	ctx: GenericEndpointContext & { context: { responseHeaders?: Headers } },
 	options: ResolvedScjwtOptions,
-	cookieName: string,
-	headers: Headers | undefined,
-): string | null {
-	if (!headers) {
-		return null;
+	sessionId: string,
+	rebind: Rebind,
+): Promise<void> {
+	const resolved = await ctx.context.internalAdapter.findSession(rebind.nativeToken);
+	if (!resolved || resolved.session.id !== sessionId) {
+		return;
 	}
-	const token = extractToken({
-		tokenPlacement: options.tokenPlacement,
-		cookieName,
-		headers,
+	const issuedAt = Math.floor(Date.now() / 1000);
+	const expiresAt = Math.min(
+		rebind.expiresAt,
+		Math.floor(new Date(resolved.session.expiresAt).getTime() / 1000),
+	);
+	if (expiresAt <= issuedAt) {
+		return;
+	}
+	const signals = getFingerprintSignals(
+		ctx.request?.headers ?? ctx.headers ?? new Headers(),
+		ctx.context.options,
+		options.fingerprint,
+	);
+	const customClaims = options.getCustomClaims
+		? await resolveCustomClaims(options, {
+				session: resolved.session,
+				user: resolved.user,
+				request: ctx.request,
+			})
+		: undefined;
+	const token = await signJwtFromParts({
+		secretConfig: ctx.context.secretConfig,
+		issuer: ctx.context.baseURL,
+		userId: resolved.session.userId,
+		fingerprint: await computeFingerprint(
+			getSigningSecret(ctx.context.secretConfig).secret,
+			signals,
+		),
+		sessionId,
+		expiresAt,
+		issuedAt,
+		remember: rebind.remember,
+		customClaims,
 	});
-	if (!token) {
-		return null;
+	if (options.tokenPlacement === "cookie") {
+		const { name, attributes } = ctx.context.authCookies.sessionToken;
+		// A `rememberMe: false` session keeps a browser-session cookie.
+		ctx.setCookie(name, token, {
+			...attributes,
+			maxAge: rebind.remember ? expiresAt - issuedAt : undefined,
+		});
+		return;
 	}
-	try {
-		const { sid } = decodeJwt(token);
-		return typeof sid === "string" ? sid : null;
-	} catch {
-		return null;
-	}
+	ctx.context.responseHeaders ??= new Headers();
+	deliverSessionToken(ctx.context.responseHeaders, token, "header", ctx.context.authCookies);
 }
 
 /**
@@ -309,6 +463,27 @@ async function buildAuthenticatedRequestHeaders(
 	return headers;
 }
 
+/**
+ * Request-only headers for a presented SCJWT that cannot authenticate: the
+ * credential and every native session cookie are removed, so neither the
+ * token nor a stray native cookie or cached snapshot can stand in for it.
+ */
+function withoutSessionCredentials(
+	sourceHeaders: Headers,
+	authCookies: AuthContext["authCookies"],
+	tokenPlacement: ResolvedScjwtOptions["tokenPlacement"],
+): Headers {
+	const headers =
+		stripNativeSessionCookies(sourceHeaders, authCookies) ??
+		new Headers(sourceHeaders);
+	if (tokenPlacement === "header") {
+		// Better Auth merges hook headers with `set`, so a deleted key would
+		// survive; an empty value counts as a missing credential.
+		headers.set("authorization", "");
+	}
+	return headers;
+}
+
 /** Signs `value` the way Better Auth's `setSignedCookie` stores it. */
 async function signRequestCookieValue(value: string, secret: string): Promise<string> {
 	const serialized = (await serializeSignedCookie("", value, secret)).replace("=", "");
@@ -343,8 +518,35 @@ function clearSessionTransport(
 }
 
 /**
- * In header placement, removes native session cookies from a request without
- * an SCJWT so a stray browser cookie cannot authenticate. Returns `null` when
+ * Clears a rejected SCJWT from the browser: expires the session-token,
+ * session-data (including its chunks), and `dontRemember` cookies unless
+ * the response already sets that cookie itself. If a new session was issued,
+ * only clean up leftover chunks. Better Auth may legitimately keep some of them on a
+ * signed-out request, such as the live `dontRemember` marker a pending
+ * two-factor sign-in needs for its verification step.
+ */
+function expireStaleSessionCookies(
+	ctx: GenericEndpointContext & { context: { responseHeaders?: Headers } },
+	sessionDataChunks: string[],
+	clearBaseCookies: boolean,
+): void {
+	const { sessionToken, sessionData, dontRememberToken } = ctx.context.authCookies;
+	const cookies = clearBaseCookies ? [sessionToken, sessionData, dontRememberToken] : [];
+	for (const name of sessionDataChunks) {
+		cookies.push({ name, attributes: sessionData.attributes });
+	}
+	for (const { name, attributes } of cookies) {
+		if (!setsCookie(ctx.context.responseHeaders, name)) {
+			// Better Auth's expireCookie also removes pending Set-Cookie entries
+			// for descendants of this name. Append an expiration for this name only.
+			ctx.setCookie(name, "", { ...attributes, maxAge: 0 });
+		}
+	}
+}
+
+/**
+ * Removes native session cookies (session token, `dontRemember`, session data
+ * and its chunks) from a request's `Cookie` header. Returns `null` when
  * nothing was removed.
  */
 function stripNativeSessionCookies(
@@ -371,12 +573,12 @@ function stripNativeSessionCookies(
 	return headers;
 }
 
-/** Verifies the presented SCJWT, mapping any failure to a generic `401`. */
+/** Verifies the presented SCJWT; any verification failure yields `null`. */
 async function verifyRequestToken(
 	context: AuthContext,
 	token: string,
 	allowCustomClaims: boolean,
-): Promise<ScjwtJwtPayload> {
+): Promise<ScjwtJwtPayload | null> {
 	try {
 		return await verifyJwt({
 			token,
@@ -385,7 +587,7 @@ async function verifyRequestToken(
 			allowCustomClaims,
 		});
 	} catch {
-		unauthorized();
+		return null;
 	}
 }
 
@@ -404,7 +606,9 @@ async function resolveCustomClaims(
  *
  * The durable row only maps the public session ID to its opaque native token;
  * `internalAdapter.findSession` then decides liveness, so secondary-storage
- * eviction and revocation are honored even when the database row is preserved.
+ * eviction and revocation are honored even when the database row is
+ * preserved. Returns `null` when the session is not live; storage failures
+ * propagate.
  */
 async function resolveAuthoritativeSession(
 	context: AuthContext,
@@ -415,16 +619,11 @@ async function resolveAuthoritativeSession(
 		where: [{ field: "id", value: sessionId }],
 	});
 	if (!candidate) {
-		unauthorized();
+		return null;
 	}
 	const resolved = await context.internalAdapter.findSession(candidate.token);
 	if (!resolved || resolved.session.id !== sessionId) {
-		unauthorized();
+		return null;
 	}
 	return { ...resolved, nativeToken: candidate.token };
-}
-
-/** Throws Better Auth's standard `401 UNAUTHORIZED` error. */
-function unauthorized(): never {
-	throw APIError.fromStatus("UNAUTHORIZED");
 }

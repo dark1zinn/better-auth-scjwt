@@ -78,22 +78,22 @@ async function signIn(auth: Auth, email: string): Promise<string> {
 }
 
 /**
- * Presents `token` and asserts a generic rejection that issues no credential,
- * returning the response body so callers can compare rejections.
+ * Presents `token` and asserts a generic rejection: the request is signed out
+ * (`200` with a `null` session, identical for every cause) and no credential
+ * is issued. `label` names the case in a failure.
  */
-async function expectRejected(auth: Auth, token: string): Promise<unknown> {
+async function expectRejected(auth: Auth, token: string, label = "token"): Promise<void> {
 	const response = await requestSession(auth, bearer(token));
-	expect(response.status).toBe(401);
-	expect(response.headers.get("set-auth-token")).toBeNull();
 	const sessionCookie = parseSetCookieHeader(response.headers.get("set-cookie") ?? "").get(
 		(await auth.$context).authCookies.sessionToken.name,
 	);
-	expect(sessionCookie?.value ?? "").toBe("");
-	const text = await response.text();
-	for (const secret of [TEST_SECRET, OTHER_SECRET, SECRET_V1, SECRET_V2]) {
-		expect(text.includes(secret)).toBe(false);
-	}
-	return text ? JSON.parse(text) : null;
+	expect({
+		label,
+		status: response.status,
+		body: await response.json(),
+		setAuthToken: response.headers.get("set-auth-token"),
+		sessionCookie: sessionCookie?.value ?? "",
+	}).toEqual({ label, status: 200, body: null, setAuthToken: null, sessionCookie: "" });
 }
 
 async function expectAuthenticated(auth: Auth, token: string, email: string) {
@@ -109,6 +109,7 @@ describe("SCJWT rejection boundaries", () => {
 		const email = "jwt-boundaries@example.com";
 		const control = (await signUpWithScjwt(auth, email)).token;
 		const claims = decodeJwt(control) as Claims;
+		const fp = claims.fp as { ip: string; ua: string; pf: string };
 		const now = Math.floor(Date.now() / 1000);
 
 		// A faithful re-signing must authenticate, so every failure below is caused by its one change.
@@ -136,6 +137,13 @@ describe("SCJWT rejection boundaries", () => {
 			["fractional iat", forge({ ...claims, iat: (claims.iat as number) + 0.5 })],
 			["fractional exp", forge({ ...claims, exp: (claims.exp as number) - 0.5 })],
 			["malformed fingerprint", forge({ ...claims, fp: "abc" })],
+			["legacy SHA-256 fingerprint string", forge({ ...claims, fp: "a".repeat(64) })],
+			["fingerprint with an extra key", forge({ ...claims, fp: { ...fp, extra: fp.ip } })],
+			["fingerprint missing a digest", forge({ ...claims, fp: { ip: fp.ip, ua: fp.ua } })],
+			["non-hex fingerprint digest", forge({ ...claims, fp: { ...fp, ua: "z".repeat(32) } })],
+			["uppercase fingerprint digest", forge({ ...claims, fp: { ...fp, pf: fp.pf.toUpperCase() } })],
+			["short fingerprint digest", forge({ ...claims, fp: { ...fp, ip: fp.ip.slice(1) } })],
+			["array fingerprint", forge({ ...claims, fp: [fp.ip, fp.ua, fp.pf] })],
 			["other subject", forge({ ...claims, sub: "user:someone-else" })],
 			["unknown session", forge({ ...claims, sid: "no-such-session" })],
 			["not a JWT", "not-a-jwt"],
@@ -145,14 +153,8 @@ describe("SCJWT rejection boundaries", () => {
 			),
 		];
 
-		const bodies = new Map<string, unknown>();
 		for (const [label, token] of cases) {
-			const body = await expectRejected(auth, await token);
-			bodies.set(label, body);
-		}
-		const [first] = bodies.values();
-		for (const [label, body] of bodies) {
-			expect({ label, body }).toEqual({ label, body: first });
+			await expectRejected(auth, await token, label);
 		}
 		expect(db.session).toHaveLength(1);
 		await expectAuthenticated(auth, control, email);

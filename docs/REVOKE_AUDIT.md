@@ -1,6 +1,8 @@
 # SCJWT revoke path audit (Better Auth 1.7.18)
 
-SCJWT invalidation is lifecycle-backed. Every presented token uses its `sid` to load the durable Better Auth session row, recovers that row's opaque native token, and asks Better Auth's `internalAdapter.findSession` whether the session is still live before a signed native session cookie is injected into the endpoint request. A missing row, a session that `findSession` no longer returns (including a secondary-store eviction of a preserved row), or an expired session returns `401`; no separate JWT blocklist exists.
+SCJWT invalidation is lifecycle-backed. Every presented token uses its `sid` to load the durable Better Auth session row, recovers that row's opaque native token, and asks Better Auth's `internalAdapter.findSession` whether the session is still live before a signed native session cookie is injected into the endpoint request. A missing row, a session that `findSession` no longer returns (including a secondary-store eviction of a preserved row), or an expired session leaves the request signed out; no separate JWT blocklist exists.
+
+"Signed out" below means the token no longer authenticates: the request continues anonymously, `/get-session` returns `null`, endpoints and guards that require a session answer `401`, and in cookie placement the response clears the stale cookie unless the request signs in again.
 
 Audit target: Better Auth 1.7.18 session-deletion paths and the next SCJWT-backed request. "Root" tests use the memory adapter (`bun test`); "Nest" tests are HTTP profiles in `examples/nestjs/test/e2e` (`bun run --cwd examples/nestjs test:e2e`).
 
@@ -8,29 +10,29 @@ Audit target: Better Auth 1.7.18 session-deletion paths and the next SCJWT-backe
 
 | Path | Better Auth route | Session effect | Next SCJWT request | Coverage |
 |---|---|---|---|---|
-| Sign out | `/sign-out` | Deletes current session | `401` | Root `test/native-session.test.ts`; Nest `scjwt-only` |
-| Revoke one session | `/revoke-session` | Deletes target session | `401` | Nest `scjwt-only` |
-| Revoke other sessions | `/revoke-other-sessions` | Deletes others; keeps current | Revoked tokens `401` | Nest `scjwt-only` |
-| Revoke all sessions | `/revoke-sessions` | Deletes all user sessions | `401` | Root `test/native-session.test.ts`; Nest `scjwt-only` |
+| Sign out | `/sign-out` | Deletes current session | Signed out | Root `test/native-session.test.ts`; Nest `scjwt-only` |
+| Revoke one session | `/revoke-session` | Deletes target session | Signed out | Nest `scjwt-only` |
+| Revoke other sessions | `/revoke-other-sessions` | Deletes others; keeps current | Revoked tokens signed out | Nest `scjwt-only` |
+| Revoke all sessions | `/revoke-sessions` | Deletes all user sessions | Signed out; a client still holding the token can sign in again | Root `test/native-session.test.ts`; Nest `scjwt-only` |
 | Change password, default | `/change-password` | Keeps existing sessions | Every token remains valid to its effective expiry | Root `test/refresh-policy.test.ts` |
-| Change password with revoke | `revokeOtherSessions: true` | Deletes every session, including the presenting one, and issues a new session to the caller | Presented and other tokens `401`; replacement valid | Root `test/refresh-policy.test.ts`; Nest `scjwt-only` |
-| Password reset (core) | `/request-password-reset` + `/reset-password` | Deletes sessions only with `emailAndPassword.revokeSessionsOnPasswordReset: true` | `401` when configured; unchanged otherwise | Root `test/native-session.test.ts` (configured), `test/refresh-policy.test.ts` (default) |
-| Password reset (email OTP) | `/email-otp/reset-password` | Same setting as core reset | `401` when configured | Nest `email-otp`; `combined-plugins` (two sessions proven live via `/me` immediately before the reset, both `401` after) |
-| Delete user (self) | `/delete-user` | Deletes user and sessions | `401` | Root `test/native-session.test.ts` |
-| Admin ban | `/admin/ban-user` | Deletes all target sessions | `401` | Root `test/admin-revoke-paths.test.ts`; Nest `admin`, `combined-plugins` |
-| Admin revoke one | `/admin/revoke-user-session` | Deletes target session | `401` | Root `test/admin-revoke-paths.test.ts`; Nest `admin`, `combined-plugins` |
-| Admin revoke all | `/admin/revoke-user-sessions` | Deletes all target sessions | `401` | Root `test/admin-revoke-paths.test.ts`; Nest `admin` |
-| Admin remove user | `/admin/remove-user` | Deletes user and sessions | `401` | Nest `admin` |
-| Unban user | `/admin/unban-user` | Does not recreate sessions | Old tokens remain `401` | Nest `admin`, `combined-plugins` |
-| Stop impersonating | `/admin/stop-impersonating` | Deletes impersonation session; restores admin session from `admin_session` | Impersonation token `401`; admin `sid` restored | Nest `admin`, `combined-plugins` |
-| Secondary-store eviction | `secondaryStorage` entry removed, row preserved | `findSession` returns null | `401` | Root `test/secondary-storage.test.ts` |
+| Change password with revoke | `revokeOtherSessions: true` | Deletes every session, including the presenting one, and issues a new session to the caller | Presented and other tokens signed out; replacement valid | Root `test/refresh-policy.test.ts`; Nest `scjwt-only` |
+| Password reset (core) | `/request-password-reset` + `/reset-password` | Deletes sessions only with `emailAndPassword.revokeSessionsOnPasswordReset: true` | Signed out when configured; unchanged otherwise | Root `test/native-session.test.ts` (configured), `test/refresh-policy.test.ts` (default) |
+| Password reset (email OTP) | `/email-otp/reset-password` | Same setting as core reset | Signed out when configured | Nest `email-otp`; `combined-plugins` (two sessions proven live via `/me` immediately before the reset, both `401` on `/me` after) |
+| Delete user (self) | `/delete-user` | Deletes user and sessions | Signed out | Root `test/native-session.test.ts` |
+| Admin ban | `/admin/ban-user` | Deletes all target sessions | Signed out | Root `test/admin-revoke-paths.test.ts`; Nest `admin`, `combined-plugins` |
+| Admin revoke one | `/admin/revoke-user-session` | Deletes target session | Signed out | Root `test/admin-revoke-paths.test.ts`; Nest `admin`, `combined-plugins` |
+| Admin revoke all | `/admin/revoke-user-sessions` | Deletes all target sessions | Signed out | Root `test/admin-revoke-paths.test.ts`; Nest `admin` |
+| Admin remove user | `/admin/remove-user` | Deletes user and sessions | Signed out | Nest `admin` |
+| Unban user | `/admin/unban-user` | Does not recreate sessions | Old tokens stay signed out | Nest `admin`, `combined-plugins` |
+| Stop impersonating | `/admin/stop-impersonating` | Deletes impersonation session; restores admin session from `admin_session` | Impersonation token signed out; admin `sid` restored | Nest `admin`, `combined-plugins` |
+| Secondary-store eviction | `secondaryStorage` entry removed, row preserved | `findSession` returns null | Signed out | Root `test/secondary-storage.test.ts` |
 | Session store outage | Session row or `secondaryStorage` read throws | No lookup result | `500`, no credential issued, no fallback to the other store; recovers when the store returns | Root `test/secondary-storage.test.ts` |
-| Store resolves another session | `findSession(token)` returns a session whose `id` differs from `sid` | Treated as not live | `401` | Root `test/secondary-storage.test.ts` |
-| Refresh racing revocation | `/get-session` refresh paused before its row update while the session is deleted | Better Auth's update finds no row | Racing request `401`; old and any replacement token `401` | Root `test/secondary-storage.test.ts` |
-| Fingerprint mismatch | SCJWT before hook | Keeps session | Mismatched token `401`; bound token remains valid | Root `test/fingerprint-mode.test.ts` |
-| Custom-claim mismatch | SCJWT before hook | Keeps session | `401` | Root `test/custom-claims.test.ts` |
-| Cookie cache snapshot | `session.cookieCache` with a still-fresh `session_data` cookie | Snapshot removed from the SCJWT request; session and user read from the store | Revoked session `401`; live session returns current role and profile | Root `test/session-cache.test.ts`; Nest `rbac` (cookie-cache profile) |
-| Email-OTP sign-in on unverified account | `/sign-in/email-otp` (`revokeUnprovenAccountAccess`) | Deletes pre-proof sessions and linked accounts, then marks email verified | Pre-proof tokens `401` | Nest `combined-plugins` |
+| Store resolves another session | `findSession(token)` returns a session whose `id` differs from `sid` | Treated as not live | Signed out | Root `test/secondary-storage.test.ts` |
+| Refresh racing revocation | `/get-session` refresh paused before its row update while the session is deleted | Better Auth's update finds no row | Racing request `401` from Better Auth; old and any replacement token signed out | Root `test/secondary-storage.test.ts` |
+| Fingerprint mismatch | SCJWT before hook | Keeps session; sign-out from the mismatched device ends nothing | Signed out when the mode does not tolerate the change (any change in `strict`); a tolerated change re-binds the token; the bound token remains valid | Root `test/fingerprint-mode.test.ts`, `test/native-session.test.ts` |
+| Custom-claim mismatch | SCJWT before hook | Keeps session | Signed out | Root `test/custom-claims.test.ts` |
+| Cookie cache snapshot | `session.cookieCache` with a still-fresh `session_data` cookie | Snapshot removed from the SCJWT request; session and user read from the store | Revoked session signed out and its snapshot cleared; live session returns current role and profile | Root `test/session-cache.test.ts`; Nest `rbac` (cookie-cache profile) |
+| Email-OTP sign-in on unverified account | `/sign-in/email-otp` (`revokeUnprovenAccountAccess`) | Deletes pre-proof sessions and linked accounts, then marks email verified | Pre-proof tokens signed out | Nest `combined-plugins` |
 
 Session refresh (`/get-session` past `updateAge`) and `/update-session` re-issue an SCJWT with the same `sid`; sign-out afterwards invalidates both the old and replacement tokens (root `test/native-session.test.ts`). `disableSessionRefresh`, the `disableRefresh` query, `deferSessionRefresh` (GET reads, POST refreshes), `rememberMe: false`, and `freshAge` keep their native semantics (root `test/refresh-policy.test.ts`, `test/session-lifetime.test.ts`).
 
@@ -41,10 +43,10 @@ A request that already passed SCJWT authentication before a revocation completes
 - Set `emailAndPassword.revokeSessionsOnPasswordReset: true` when password reset must invalidate every device.
 - Use `revokeOtherSessions: true` on password change when other devices must lose access immediately.
 - A configured `secondaryStorage` must also set `session.storeSessionInDatabase: true`; the row maps `sid` to the native token while `findSession` decides liveness.
-- Header-placement clients must remove their locally stored Bearer token after logout or revocation. The server cannot clear client-managed authorization state.
+- Header-placement clients must remove their locally stored Bearer token after logout or revocation, and when `/get-session` returns `null`. The server cannot clear client-managed authorization state.
 
 ## References
 
-- `src/plugin/hooks.ts` — `resolveAuthoritativeSession`, native request-cookie injection, fingerprint and custom-claim rejection.
+- `src/plugin/hooks.ts` — `resolveAuthoritativeSession`, native request-cookie injection, signed-out handling of tokens that fail fingerprint, custom-claim, or liveness checks.
 - `test/native-session.test.ts`, `test/secondary-storage.test.ts`, `test/admin-revoke-paths.test.ts`, `test/fingerprint-mode.test.ts`, `test/custom-claims.test.ts` — root lifecycle coverage.
 - `examples/nestjs/test/e2e/*.e2e-spec.ts` — HTTP profiles per plugin and combined.

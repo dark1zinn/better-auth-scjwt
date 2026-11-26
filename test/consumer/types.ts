@@ -7,6 +7,8 @@ import {
 	scjwt,
 	type FingerprintMode,
 	type JsonValue,
+	type ScjwtFingerprint,
+	type ScjwtFingerprintOptions,
 	type ScjwtJwtPayload,
 	type ScjwtOptions,
 	type TokenPlacement,
@@ -17,7 +19,10 @@ type IsAny<T> = 0 extends 1 & T ? true : false;
 
 const options: ScjwtOptions = {
 	tokenPlacement: "header" satisfies TokenPlacement,
-	fingerprintMode: "ip-only" satisfies FingerprintMode,
+	fingerprint: {
+		mode: "dynamic" satisfies FingerprintMode,
+		ipv4Prefix: 24,
+	} satisfies ScjwtFingerprintOptions,
 	getCustomClaims: ({ user }) => ({ plan: (user.plan as JsonValue) ?? null }),
 };
 
@@ -49,6 +54,8 @@ export async function registeredPlugin() {
 declare const payload: ScjwtJwtPayload;
 export const remember: boolean = payload.remember;
 export const sid: string = payload.sid;
+export const fingerprint: ScjwtFingerprint = payload.fp;
+export const userAgentDigest: string = payload.fp.ua;
 
 export const client = createAuthClient({ plugins: [scjwtClient()] });
 const clientId: "scjwt" = scjwtClient().id;

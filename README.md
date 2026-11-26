@@ -81,7 +81,11 @@ The client plugin supplies Better Auth type inference. Import it from `better-au
 ```ts
 interface ScjwtOptions {
   tokenPlacement?: "cookie" | "header";
-  fingerprintMode?: "strict" | "ip-only";
+  fingerprint?: {
+    mode?: "strict" | "dynamic" | "loose";
+    ipv4Prefix?: number;
+    ipv6Prefix?: number;
+  };
   getCustomClaims?: (context: {
     session: Session;
     user: User;
@@ -93,7 +97,9 @@ interface ScjwtOptions {
 | Option | Default | Behavior |
 |---|---|---|
 | `tokenPlacement` | `"cookie"` | Selects the only accepted and emitted SCJWT transport. |
-| `fingerprintMode` | `"strict"` | `strict` binds IP, User-Agent, and `Sec-CH-UA-Platform`; `ip-only` binds only IP. |
+| `fingerprint.mode` | `"strict"` | How a token is bound to its device; see [Device binding](#device-binding). |
+| `fingerprint.ipv4Prefix` | `32` in `strict`, `24` otherwise | Leading IPv4 bits that identify the client network, 0 to 32. |
+| `fingerprint.ipv6Prefix` | `128` in `strict`, `48` otherwise | Leading IPv6 bits that identify the client network, 0 to 128. Better Auth's `advanced.ipAddress.ipv6Subnet` applies first, so the shorter prefix wins. |
 | `getCustomClaims` | unset | Resolves visible signed JSON claims at issuance, refresh, and verification. |
 
 ### Cookie placement
@@ -106,7 +112,9 @@ With `secondaryStorage`, `findSession` consults the secondary store first. A ses
 
 ### Cookie cache
 
-Better Auth's `session.cookieCache` stores a signed `session_data` snapshot in the browser so `getSession` can skip the session store until the snapshot expires. Under SCJWT the snapshot is never the server-side source of truth: for every request with a verified SCJWT, the before hook removes `session_data` (and its chunks) from the request it hands to Better Auth, so `/get-session`, guards built on `auth.api.getSession` such as `@thallesp/nestjs-better-auth`, and other endpoints read the current session and user from the store. Role downgrades, profile changes, and session-field updates therefore take effect on the next request instead of after `cookieCache.maxAge`. Better Auth may still emit `session_data` in responses, and client-side code that reads it (for example a UI session store) can show older data until it refreshes; server authorization is unaffected. A revoked session is rejected before any endpoint runs, with or without a snapshot.
+Better Auth's `session.cookieCache` stores a signed `session_data` snapshot in the browser so `getSession` can skip the session store until the snapshot expires. Under SCJWT the snapshot is never the server-side source of truth: for every request with a verified SCJWT, the before hook removes `session_data` (and its chunks) from the request it hands to Better Auth, so `/get-session`, guards built on `auth.api.getSession` such as `@thallesp/nestjs-better-auth`, and other endpoints read the current session and user from the store. Role downgrades, profile changes, and session-field updates therefore take effect on the next request instead of after `cookieCache.maxAge`. Better Auth may still emit `session_data` in responses, and client-side code that reads it (for example a UI session store) can show older data until it refreshes; server authorization is unaffected. A revoked session is signed out before any endpoint runs, with or without a snapshot, and in cookie placement the response clears the snapshot together with the SCJWT.
+
+In cookie placement the snapshot Better Auth emits contains the session row, including its `ipAddress`, `userAgent`, and native `token`. Better Auth's `compact` and `jwt` strategies sign it but do not encrypt it, so anything that can read the browser's cookie store can read those values, even though `fp` reveals no signal. Use `cookieCache: { strategy: "jwe" }` when that matters. The native token in the snapshot does not authenticate under SCJWT.
 
 ### Header placement
 
@@ -123,9 +131,9 @@ Send the value back as:
 Authorization: Bearer <SCJWT>
 ```
 
-Live native session-token, session-data, and `dontRemember` cookies are removed from successful issuance responses; account and clearing cookies are preserved. Header clients must remove their locally stored Bearer token after logout or revocation because a server cannot clear client-managed authorization state.
+Live native session-token, session-data, and `dontRemember` cookies are removed from successful issuance responses; account and clearing cookies are preserved. Header clients must remove their locally stored Bearer token after logout or revocation because a server cannot clear client-managed authorization state. A `null` session from `/get-session` means the stored token no longer authenticates.
 
-The configured placement is authoritative. Cookie mode ignores `Authorization`; header mode ignores the session cookie. A present but invalid credential in the configured transport returns `401` and never falls back to the other transport. Only the `Bearer` scheme (case-insensitive) is read; an empty or non-Bearer `Authorization` value counts as a missing SCJWT.
+The configured placement is authoritative. Cookie mode ignores `Authorization`; header mode ignores the session cookie. A present but invalid credential in the configured transport signs the request out (see [Security model](#security-model)) and never falls back to the other transport. Only the `Bearer` scheme (case-insensitive) is read; an empty or non-Bearer `Authorization` value counts as a missing SCJWT.
 
 `Access-Control-Expose-Headers` only lets a page that is already allowed to read the response see `set-auth-token`; it grants no cross-origin access by itself. Your CORS policy decides which origins may call the API and send `Authorization`.
 
@@ -163,12 +171,14 @@ The core payload is:
 |---|---|
 | `iss` | Resolved Better Auth authentication base URL. |
 | `sub` | `user:{session.userId}`. |
-| `fp` | Lowercase SHA-256 fingerprint. |
+| `fp` | Keyed device-signal digests `{ ip, ua, pf }`: 32 lowercase hex characters each, an HMAC-SHA-256 under the signing secret truncated to 128 bits. |
 | `iat`, `exp` | Unix issuance and effective-expiry seconds. |
 | `sid` | Canonical Better Auth session-row ID. |
 | `remember` | `false` when Better Auth created the session with `rememberMe: false`; otherwise `true`. |
 
 `remember` carries Better Auth's non-persistent session policy without a client cookie. At issuance it mirrors the native `dontRemember` marker that `setSessionCookie` writes; on each request SCJWT discards any caller-supplied `dontRemember` cookie and reconstructs the signed marker only when `remember` is `false`. Better Auth then skips refresh exactly as it would for a native `rememberMe: false` session, so such sessions keep their one-day lifetime in both placements, and replacement tokens (for example from `/update-session`) inherit the policy. In cookie placement the SCJWT cookie of a non-persistent session is a browser-session cookie; header clients decide how long they keep their own Bearer token.
+
+`fp` keeps one digest per signal so a change can be attributed to the IP, the User-Agent, or the platform. The digests are keyed: a token holder cannot read the client IP out of `fp` or confirm a guessed value without the secret. They are computed with the secret that signed the token (its `kid`), so rotating Better Auth's secret never looks like a device change.
 
 With a single Better Auth `secret`, SCJWT signs directly with that secret. With Better Auth `secrets`, new tokens carry the current secret version as `kid`; verification accepts current and retained versions.
 
@@ -180,7 +190,27 @@ Without `getCustomClaims`, every extra payload key is rejected. With a resolver,
 - contain only finite numbers, strings, booleans, null, arrays, and plain objects;
 - not use `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `fp`, `sid`, or `remember`.
 
-The resolver runs again after the session and user are loaded. Presented custom claims must equal the current result under JSON semantics: the comparison is structural, object key order is ignored, and numbers compare by value, so values that JSON normalizes (for example `-0`, which serializes as `0`) still match. Custom-claim and device-fingerprint mismatches reject the token without deleting its shared backing session. A resolver that returns invalid claims at issuance fails the request without delivering a token.
+The resolver runs again after the session and user are loaded. Presented custom claims must equal the current result under JSON semantics: the comparison is structural, object key order is ignored, and numbers compare by value, so values that JSON normalizes (for example `-0`, which serializes as `0`) still match. A custom-claim mismatch, like a device change the fingerprint mode does not tolerate, signs the request out without deleting the shared backing session. A resolver that returns invalid claims at issuance fails the request without delivering a token.
+
+## Device binding
+
+Every SCJWT carries keyed digests of three signals from the request it was issued for: the client network (Better Auth's resolved IP reduced to `ipv4Prefix` or `ipv6Prefix` leading bits), the User-Agent, and `Sec-CH-UA-Platform`. Each request compares them with its own signals, and `fingerprint.mode` decides what a difference means:
+
+| Mode | Network changed | User-Agent changed | Network and User-Agent changed | Platform changed |
+|---|---|---|---|---|
+| `strict` (default) | Signed out | Signed out | Signed out | Signed out |
+| `dynamic` | Continues, token re-bound | Continues, token re-bound | Signed out | Signed out |
+| `loose` | Continues, token re-bound | Continues, token re-bound | Continues, token re-bound | Continues, token re-bound |
+
+`strict` compares exact addresses by default (`ipv4Prefix: 32`; IPv6 within Better Auth's `ipv6Subnet`) and suits clients with a stable address. `dynamic` and `loose` compare `/24` IPv4 and `/48` IPv6 networks by default, so moving within a typical home, office, or mobile network is no change at all; they suit privacy browsers, rotating VPNs, and mobile clients. Signals are compared with the presented token, not with the first sign-in: a re-bound token becomes the new reference.
+
+Re-binding re-issues the presented session's SCJWT for the current signals once the request succeeds, unless its response already sets, clears, or delivers the session transport (for example sign-out, a new or refreshed session, or a failure). The replacement keeps the session ID, `exp`, and `remember` policy, so a re-bind never extends a session; refresh stays Better Auth's. Custom claims are resolved again for it. The previous token keeps working from its own device until it expires or the session is revoked. Re-binding is best effort: if it fails (for example the custom-claims resolver throws), the error is logged through Better Auth's logger and the completed response is returned without a replacement.
+
+The replacement reaches the client like any issued SCJWT: as the session cookie in cookie placement, as `set-auth-token` in header placement. Header clients must store every `set-auth-token` they receive, not only the one from sign-in. Route guards that call `auth.api.getSession` without forwarding its response headers authenticate a tolerated request but cannot deliver its replacement; the client receives one on its next Better Auth endpoint call.
+
+A tolerated change is a risk decision. `dynamic` accepts a stolen token replayed from another network with the victim's User-Agent, and then re-binds it; `loose` keeps only session liveness, expiry, and custom claims. Use `strict` when tokens must stay on one address, and revoke sessions (`/revoke-sessions`, or a password change with `revokeOtherSessions`) to end every copy of a token.
+
+The encoded network includes its prefix length, so changing the prefixes, including through another mode's defaults, makes every existing token see a network change: `strict` signs them out, and the tolerant modes re-bind them (`dynamic` only while their User-Agent is unchanged).
 
 ## IP and proxy configuration
 
@@ -201,26 +231,45 @@ betterAuth({
 
 Do not trust forwarding headers from origins directly reachable by clients: without a proxy that overwrites the header, a client chooses its own `X-Forwarded-For`.
 
-The fingerprint constrains replay; it is not proof of device possession. User-Agent and `Sec-CH-UA-Platform` are client-supplied, and the IP is only as trustworthy as your proxy configuration. When Better Auth resolves no client IP (in production: no configured header present, a multi-hop chain with no `trustedProxies`, or `ipAddress.disableIpTracking`), SCJWT hashes an empty IP. `strict` mode then still binds the browser headers, while `ip-only` binds nothing at all. This keeps server-to-server and IP-less deployments working; configure `ipAddressHeaders` and `trustedProxies` if you rely on IP binding. Tokens issued through direct `auth.api` calls are bound to the headers of that call, so a token minted for a browser must be issued with the browser's request headers.
+The fingerprint constrains replay; it is not proof of device possession. User-Agent and `Sec-CH-UA-Platform` are client-supplied, and the IP is only as trustworthy as your proxy configuration. When Better Auth resolves no client IP (in production: no configured header present, a multi-hop chain with no `trustedProxies`, or `ipAddress.disableIpTracking`), the network signal is empty. `strict` mode then still binds the browser headers, and the tolerant modes treat the empty network like any other value. This keeps server-to-server and IP-less deployments working; configure `ipAddressHeaders` and `trustedProxies` if you rely on IP binding. Tokens issued through direct `auth.api` calls are bound to the headers of that call, so a token minted for a browser must be issued with the browser's request headers.
 
 ## Security model
 
 - Signature, issuer, expiry, payload shape, session subject, lifecycle-aware session liveness (`internalAdapter.findSession`), database expiry, fingerprint, and configured custom claims are checked before native session injection.
-- Missing SCJWT falls through to ordinary Better Auth handling. A present invalid SCJWT returns Better Auth's standard `401 UNAUTHORIZED` response.
+- Missing SCJWT falls through to ordinary Better Auth handling. A present SCJWT that fails any check is treated like an invalid Better Auth session cookie: the before hook removes it and Better Auth's native session cookies from the request, which continues signed out. `/get-session` returns `null`, sign-in and sign-up work normally, and endpoints that require a session return Better Auth's own `401 UNAUTHORIZED`. A rejection never deletes or changes the backing session.
+- In cookie placement, a signed-out response clears the SCJWT and Better Auth's session cookies unless the request establishes a new session, so a browser holding a stale token recovers on its next Better Auth request. A cookie the response already sets is left to Better Auth, such as the `dontRemember` marker a pending two-factor sign-in carries to its verification step. Route guards that call `auth.api.getSession` without forwarding its response headers cannot deliver this clearing. In header placement the server cannot clear a client's stored token; discard it when `/get-session` returns `null`.
 - Session deletion is immediate revocation; there is no SCJWT blocklist.
 - Storage outages fail closed: if the session row or `secondaryStorage` cannot be read, the request fails with a server error (`500`), not `401`, and no credential is issued. SCJWT never falls back from one store to the other.
-- Fingerprint mismatch returns `401` without deleting the session, preventing a mismatched bearer from terminating the shared session.
-- Custom-claim mismatch returns `401` without deleting the session.
+- A device change the fingerprint mode does not tolerate signs the request out without deleting the session, so a mismatched bearer cannot terminate the shared session, not even through `/sign-out`. A tolerated change re-binds the token instead (see [Device binding](#device-binding)).
+- A custom-claim mismatch signs the request out without deleting the session.
 - CSRF: cookie placement is an ambient credential, and Better Auth's origin check rejects state-changing requests from untrusted or missing `Origin` exactly as for native session cookies. Header placement is not ambient (a script must attach `Authorization`), so Better Auth does not origin-check Bearer requests; restrict callers with CORS. Better Auth disables its origin check when `NODE_ENV` is `test` unless `advanced.disableOriginCheck` is set to `false`.
 - Direct `auth.api` calls do not pass through Better Auth's HTTP router, so its origin and CSRF checks do not run; routes that forward browser headers to `auth.api` must validate `Origin` themselves (see Better Auth's [security reference](https://better-auth.com/docs/reference/security)).
 - Better Auth's `bearer()` plugin cannot be registered with `scjwt()`; initialization fails with `[scjwt] the Better Auth bearer() plugin cannot be combined with scjwt()`. Both own the session transport, and in cookie placement `bearer()` would turn the native session token returned in sign-in and sign-up response bodies into an authenticated session without SCJWT's fingerprint and claim checks. Use `scjwt({ tokenPlacement: "header" })` for `Authorization: Bearer` clients.
+- Better Auth's `multiSession()` plugin cannot be registered with `scjwt()` either; initialization fails with `[scjwt] the Better Auth multiSession() plugin cannot be combined with scjwt()`. It keeps each device session's raw native token in its own signed cookies and `/multi-session/set-active` turns any of them into the active session, so a copied cookie would yield a fresh SCJWT bound to whoever presents it. Multiple concurrent accounts per browser are not supported with SCJWT.
+- `oneTimeToken()` works with SCJWT. Generating a one-time token requires an authenticated SCJWT, and verifying it hands the session to the redeeming client as a new SCJWT bound to that client's device; the token is a short-lived, single-use credential for exactly that handoff. The native session token in the verify response body does not authenticate.
 - Revocation audit: [`docs/REVOKE_AUDIT.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/REVOKE_AUDIT.md). Security review and known limitations: [`docs/SECURITY_REVIEW.md`](https://github.com/dark1zinn/better-auth-scjwt/blob/main/docs/SECURITY_REVIEW.md).
 
 ## Migration
 
+### From `fingerprintMode`
+
+`scjwt({ fingerprintMode })` is replaced by `scjwt({ fingerprint: { mode } })`, and the old option fails at startup with `[scjwt] fingerprintMode was replaced by fingerprint.mode`. `"strict"` keeps its meaning and its exact-address default. `"ip-only"` has no equivalent: no mode keeps the IP binding strict while ignoring browser changes. `"ip-only"` signed out any change of address and ignored the browser; `"loose"` tolerates network changes too, so a deployment that relied on `"ip-only"` for IP binding loses it there. The closest option is `"dynamic"`, optionally with `ipv4Prefix`/`ipv6Prefix`: it tolerates a User-Agent change on its own, but also a network change on its own, and rejects any platform change. Keep `"strict"` if the IP binding matters more than browser changes.
+
+### Tokens issued before keyed fingerprints
+
+`fp` changed from one unkeyed SHA-256 string to keyed per-signal digests. Tokens with the old shape are rejected; requests carrying them are signed out, and users sign in again. No database migration is involved.
+
+### Invalid tokens are signed out instead of returning `401`
+
+Endpoints that do not require a session (such as `/get-session`, sign-in, sign-up, and sign-out) no longer answer `401` for an invalid, expired, revoked, or mismatched SCJWT. They continue signed out, and `/get-session` returns `null` with `200`. Clients that detected a dead token from a `401` on `/get-session` must check for a `null` session instead. Endpoints and guards that require a session still answer `401`.
+
 ### Tokens issued before the `remember` claim
 
-`remember` is a required claim. Tokens issued by earlier 0.1.x builds lack it and are rejected with `401`; users sign in again to receive a replacement. No database migration is involved, and there is no fallback that accepts the old shape.
+`remember` is a required claim. Tokens issued by earlier 0.1.x builds lack it and are rejected; requests carrying them are signed out, and users sign in again to receive a replacement. No database migration is involved, and there is no fallback that accepts the old shape.
+
+### Configurations that also register `multiSession()`
+
+Remove Better Auth's `multiSession()` plugin; it is not supported with SCJWT. Its `_multi-` cookies stop being written, and existing ones are ignored by every endpoint because the plugin is no longer registered.
 
 ### Configurations that also register `bearer()`
 

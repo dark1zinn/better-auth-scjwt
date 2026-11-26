@@ -4,7 +4,7 @@ import { betterAuth } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import { parseSetCookieHeader, setSessionCookie } from "better-auth/cookies";
-import { bearer } from "better-auth/plugins";
+import { bearer, multiSession, oneTimeToken } from "better-auth/plugins";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import { kAPIErrorHeaderSymbol } from "better-call";
 import { decodeJwt } from "jose";
@@ -15,6 +15,7 @@ import {
 	TEST_SECRET,
 	createCookieHeaders,
 	createMemoryDB,
+	expectSignedOut,
 	requestSession,
 	rowAt,
 	signUpWithScjwt,
@@ -352,9 +353,7 @@ describe("terminal SCJWT session finalizer", () => {
 			(await requestSession(plain, bearerHeaders(issued.token))).status,
 		).toBe(200);
 		// The token is bound to the issuing instance's secret.
-		expect(
-			(await requestSession(denied, bearerHeaders(issued.token))).status,
-		).toBe(401);
+		await expectSignedOut(await requestSession(denied, bearerHeaders(issued.token)));
 		expect((await plain.$context).options.plugins?.map((plugin) => plugin.id)).toEqual([
 			"scjwt",
 			"scjwt-session-finalizer",
@@ -436,6 +435,104 @@ describe("terminal SCJWT session finalizer", () => {
 		}
 	});
 
+	test("refuses to start alongside Better Auth's multiSession() plugin", async () => {
+		for (const tokenPlacement of PLACEMENTS) {
+			for (const order of ["scjwt-first", "multi-session-first"] as const) {
+				const plugins =
+					order === "scjwt-first"
+						? [scjwt({ tokenPlacement }), multiSession()]
+						: [multiSession(), scjwt({ tokenPlacement })];
+				const auth = betterAuth({
+					database: memoryAdapter(createMemoryDB()),
+					baseURL: TEST_BASE_URL,
+					secret: TEST_SECRET,
+					emailAndPassword: { enabled: true },
+					plugins,
+				});
+				await expect(auth.$context).rejects.toThrow(
+					"[scjwt] the Better Auth multiSession() plugin cannot be combined with scjwt()",
+				);
+			}
+		}
+	});
+
+	test("rejects requests when another plugin's init installs multiSession()", async () => {
+		const db = createMemoryDB();
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [
+				{ id: "installs-multi-session", init: () => ({ options: { plugins: [multiSession()] } }) },
+				scjwt(),
+			],
+		});
+		expect((await auth.$context).options.plugins?.map((plugin) => plugin.id)).toContain(
+			"multi-session",
+		);
+		await expect(
+			auth.api.signUpEmail({
+				body: signUpBody("init-multi-session@example.com"),
+				headers: new Headers(STABLE_HEADERS),
+			}),
+		).rejects.toThrow("[scjwt] the Better Auth multiSession() plugin cannot be combined with scjwt()");
+		expect(db.user).toHaveLength(0);
+	});
+
+	test("oneTimeToken() hands the session to its redeemer as an SCJWT bound to the redeemer", async () => {
+		const redeemer = { "user-agent": "redeeming-app", "sec-ch-ua-platform": '"Android"' };
+		for (const tokenPlacement of PLACEMENTS) {
+			const auth = betterAuth({
+				database: memoryAdapter(createMemoryDB()),
+				baseURL: TEST_BASE_URL,
+				secret: TEST_SECRET,
+				emailAndPassword: { enabled: true },
+				plugins: [scjwt({ tokenPlacement }), oneTimeToken()],
+			});
+			const email = `${tokenPlacement}-one-time-token@example.com`;
+			const issued = await signUpWithScjwt(auth, email);
+			const present = (token: string, from: HeaderInput) => {
+				if (tokenPlacement === "cookie") {
+					return createCookieHeaders(issued.cookieName, token, from);
+				}
+				const headers = new Headers(from);
+				headers.set("authorization", `Bearer ${token}`);
+				return headers;
+			};
+			const generate = (headers: Headers) =>
+				auth.handler(new Request(`${TEST_BASE_URL}/api/auth/one-time-token/generate`, { headers }));
+			const verify = (token: string) =>
+				auth.handler(
+					new Request(`${TEST_BASE_URL}/api/auth/one-time-token/verify`, {
+						method: "POST",
+						headers: { ...redeemer, "content-type": "application/json", origin: TEST_BASE_URL },
+						body: JSON.stringify({ token }),
+					}),
+				);
+
+			expect((await generate(new Headers(STABLE_HEADERS))).status).toBe(401);
+			const generated = await generate(present(issued.token, STABLE_HEADERS));
+			expect(generated.status).toBe(200);
+			const { token: oneTime } = (await generated.json()) as { token: string };
+
+			const verified = await verify(oneTime);
+			expect(verified.status).toBe(200);
+			const body = (await verified.json()) as { session: { token: string } };
+			const handed =
+				tokenPlacement === "header"
+					? verified.headers.get("set-auth-token")
+					: parseSetCookieHeader(verified.headers.get("set-cookie") ?? "").get(issued.cookieName)
+							?.value;
+			expect(handed?.split(".")).toHaveLength(3);
+			await expectAuthenticatedAs(await requestSession(auth, present(handed ?? "", redeemer)), email);
+			await expectSignedOut(await requestSession(auth, present(handed ?? "", STABLE_HEADERS)));
+			// The native token in the response body is not an SCJWT, and the one-time token is single use.
+			await expectSignedOut(await requestSession(auth, present(body.session.token, redeemer)));
+			expect((await verify(oneTime)).status).toBe(400);
+		}
+	});
+
 	test("header placement withholds the token while a two-factor challenge is pending", async () => {
 		const codes = new Map<string, string>();
 		const db = { ...createMemoryDB(), twoFactor: [] };
@@ -503,5 +600,75 @@ describe("terminal SCJWT session finalizer", () => {
 		expect(token?.split(".")).toHaveLength(3);
 		const session = await requestSession(auth, bearerHeaders(token ?? ""));
 		expect(await session.json()).toMatchObject({ user: { email } });
+	});
+
+	test("a stale SCJWT does not erase the dontRemember marker of a pending two-factor sign-in", async () => {
+		const codes = new Map<string, string>();
+		const db = { ...createMemoryDB(), twoFactor: [] };
+		const auth = betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [
+				scjwt(),
+				twoFactor({
+					otpOptions: {
+						sendOTP: async ({ user, otp }) => {
+							codes.set(user.id, otp);
+						},
+					},
+				}),
+			],
+		});
+		const email = "cookie-two-factor-nonpersistent@example.com";
+		const issued = await signUpWithScjwt(auth, email);
+		const post = (path: string, cookie: string, body: object) =>
+			auth.handler(
+				new Request(`${TEST_BASE_URL}/api/auth${path}`, {
+					method: "POST",
+					headers: { ...STABLE_HEADERS, "content-type": "application/json", cookie },
+					body: JSON.stringify(body),
+				}),
+			);
+		const sessionCookie = (token: string) =>
+			`${issued.cookieName}=${encodeURIComponent(token)}`;
+		/** Cookies a browser keeps after `response`: live entries only. */
+		const liveCookies = (response: Response) =>
+			[...parseSetCookieHeader(response.headers.get("set-cookie") ?? "")]
+				.filter(([, attributes]) => attributes.value && attributes["max-age"] !== 0)
+				.map(([name, attributes]) => `${name}=${encodeURIComponent(attributes.value)}`)
+				.join("; ");
+
+		const enabled = await post("/two-factor/enable", sessionCookie(issued.token), {
+			password: PASSWORD,
+			method: "otp",
+		});
+		expect(enabled.status).toBe(200);
+		const current = parseSetCookieHeader(enabled.headers.get("set-cookie") ?? "").get(
+			issued.cookieName,
+		)?.value;
+		expect((await post("/revoke-sessions", sessionCookie(current ?? ""), {})).status).toBe(200);
+
+		// The browser still holds the now revoked SCJWT when it signs in again.
+		const pending = await post("/sign-in/email", sessionCookie(current ?? ""), {
+			email,
+			password: PASSWORD,
+			rememberMe: false,
+		});
+		expect(await pending.json()).toMatchObject({ twoFactorRedirect: true });
+		const challenge = liveCookies(pending);
+		expect(challenge).toContain("dont_remember=");
+
+		expect((await post("/two-factor/send-otp", challenge, {})).status).toBe(200);
+		const verified = await post("/two-factor/verify-otp", challenge, {
+			code: codes.get(rowAt(db.user).id ?? ""),
+		});
+		expect(verified.status).toBe(200);
+		const cookie = parseSetCookieHeader(verified.headers.get("set-cookie") ?? "").get(
+			issued.cookieName,
+		);
+		expect(decodeJwt(cookie?.value ?? "").remember).toBe(false);
+		expect(cookie?.["max-age"]).toBeUndefined();
 	});
 });

@@ -1,10 +1,15 @@
+import { expect } from "bun:test";
 import type { AuthContext, Session } from "better-auth";
 import type { MemoryDB } from "better-auth/adapters/memory";
 import { parseSetCookieHeader } from "better-auth/cookies";
 import { computeFingerprint } from "../../src/plugin/fingerprint";
-import { signJwtFromParts, type ScjwtSecretConfig } from "../../src/plugin/jwt";
-import { getRequestFingerprintInput } from "../../src/plugin/request-context";
-import type { FingerprintMode } from "../../src/plugin/types";
+import {
+	getSigningSecret,
+	signJwtFromParts,
+	type ScjwtSecretConfig,
+} from "../../src/plugin/jwt";
+import { getFingerprintSignals } from "../../src/plugin/request-context";
+import type { ResolvedFingerprintOptions } from "../../src/plugin/types";
 
 export const TEST_BASE_URL = "http://localhost:3000";
 export const TEST_SECRET = "better-auth-scjwt-test-secret-at-least-32-bytes";
@@ -23,11 +28,18 @@ export type TestDB = MemoryDB & {
 };
 
 interface MintContext {
-	options: Parameters<typeof getRequestFingerprintInput>[1];
+	options: Parameters<typeof getFingerprintSignals>[1];
 	secretConfig: ScjwtSecretConfig;
 	baseURL: string;
 	sessionConfig: { expiresIn: number };
 }
+
+/** The resolved defaults of `strict` mode, which every suite uses unless it says otherwise. */
+const STRICT_FINGERPRINT: ResolvedFingerprintOptions = {
+	mode: "strict",
+	ipv4Prefix: 32,
+	ipv6Prefix: 128,
+};
 export interface TestAuth {
 	handler(request: Request): Promise<Response>;
 	$context: Promise<{ authCookies: AuthContext["authCookies"] }>;
@@ -104,24 +116,35 @@ export async function requestSession(
 	);
 }
 
+/**
+ * Asserts a signed-out `get-session` answer: `200` with a `null` body, which is
+ * how Better Auth answers when no session authenticates the request.
+ */
+export async function expectSignedOut(response: Response): Promise<void> {
+	expect(response.status).toBe(200);
+	expect(await response.json()).toBeNull();
+}
+
+/** Signs an SCJWT for `session` bound to `headers` under strict fingerprinting. */
 export async function mintScjwt(
 	context: MintContext,
 	session: Session,
 	headers: HeaderInput = STABLE_HEADERS,
-	fingerprintMode: FingerprintMode = "strict",
 ): Promise<string> {
-	const requestHeaders = new Headers(headers);
-	const input = getRequestFingerprintInput(
-		requestHeaders,
+	const input = getFingerprintSignals(
+		new Headers(headers),
 		context.options,
-		fingerprintMode,
+		STRICT_FINGERPRINT,
 	);
 	const issuedAt = Math.floor(Date.now() / 1000);
 	return signJwtFromParts({
 		secretConfig: context.secretConfig,
 		issuer: context.baseURL,
 		userId: session.userId,
-		fingerprint: await computeFingerprint(input.ip, input.ua, input.platform),
+		fingerprint: await computeFingerprint(
+			getSigningSecret(context.secretConfig).secret,
+			input,
+		),
 		sessionId: session.id,
 		expiresAt: Math.min(
 			Math.floor(new Date(session.expiresAt).getTime() / 1000),

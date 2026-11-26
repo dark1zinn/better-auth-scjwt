@@ -5,18 +5,22 @@ This document records the implemented native-session design, tested against Bett
 ## Invariants
 
 1. **Lifecycle authority:** `sid` identifies a Better Auth database session row. Every presented SCJWT must resolve that row and then pass Better Auth's lifecycle-aware `internalAdapter.findSession` before authentication succeeds.
-2. **Immediate revocation:** a deleted or expired row makes the next SCJWT request unauthorized.
+2. **Immediate revocation:** a deleted or expired row makes the next SCJWT request signed out.
 3. **Native compatibility:** verified requests are converted into a correctly signed Better Auth session cookie and continue through the standard endpoint pipeline.
 4. **Single configuration source:** Better Auth owns secrets, issuer/base URL, session lifetime, refresh timing, cookie settings, and proxy/IP resolution.
 5. **Deterministic transport:** exactly one configured source is read. Cookie and header values never silently override each other.
-6. **Fail closed:** a present invalid SCJWT returns Better Auth `UNAUTHORIZED`; a missing token falls through.
+6. **Fail closed, recover cleanly:** a present SCJWT that fails any check never authenticates. It and every native session cookie are removed from the request, which continues signed out exactly as with an invalid native session cookie: endpoints that require a session answer Better Auth `UNAUTHORIZED`, while sign-in and sign-up still work. In cookie placement the response clears the stale cookie unless a new session is established. A missing token falls through.
 
 ## Public API
 
 ```ts
 export interface ScjwtOptions {
   tokenPlacement?: "cookie" | "header";
-  fingerprintMode?: "strict" | "ip-only";
+  fingerprint?: {
+    mode?: "strict" | "dynamic" | "loose";
+    ipv4Prefix?: number; // 32 in strict, 24 otherwise
+    ipv6Prefix?: number; // 128 in strict, 48 otherwise
+  };
   getCustomClaims?: (
     context: ScjwtClaimContext,
   ) => Awaitable<Record<string, JsonValue>>;
@@ -25,7 +29,7 @@ export interface ScjwtOptions {
 export function scjwt(options?: ScjwtOptions): BetterAuthPlugin;
 ```
 
-Defaults are cookie placement and strict fingerprinting. There are no plugin-local secret, issuer, lifetime, cookie-name, or sliding-refresh options.
+Defaults are cookie placement and strict fingerprinting. There are no plugin-local secret, issuer, lifetime, cookie-name, or sliding-refresh options. The removed `fingerprintMode` option fails option resolution with a message naming `fingerprint.mode`.
 
 ## Initialization
 
@@ -39,12 +43,15 @@ For every endpoint:
 
 1. Read the SCJWT from the selected Better Auth session cookie or Bearer header.
 2. Verify HS256, optional versioned-secret `kid`, issuer, `exp`, core payload shape, and custom JSON shape.
-3. Load the row by `sid` only to recover its opaque native `session.token`, then call `internalAdapter.findSession(token)`. Reject when the row is missing, `findSession` returns null (for example, the secondary store dropped a preserved row's session), or the resolved session id differs from `sid`.
-4. Using the authoritative session and user, reject an expired session, subject mismatch, or token lifetime beyond Better Auth's effective session limit.
-5. Recompute the selected fingerprint. Reject a mismatch with `401` without deleting the shared backing session, so a mismatched bearer cannot terminate a legitimate device's session.
+3. Load the row by `sid` only to recover its opaque native `session.token`, then call `internalAdapter.findSession(token)`. Fail when the row is missing, `findSession` returns null (for example, the secondary store dropped a preserved row's session), or the resolved session id differs from `sid`.
+4. Using the authoritative session and user, fail an expired session, subject mismatch, or token lifetime beyond Better Auth's effective session limit.
+5. Digest the request's signals (Better Auth `getIP` reduced to the configured network prefix, User-Agent, `Sec-CH-UA-Platform`) with the secret selected by the token's `kid`, and compare them with `fp` under the mode: `strict` fails any change; `dynamic` fails a platform change or a simultaneous network and User-Agent change and tolerates one of the two; `loose` tolerates every change. A failure never deletes the shared backing session, so a mismatched bearer cannot terminate a legitimate device's session; a tolerated change is recorded for re-binding.
 6. If configured, rerun `getCustomClaims` against the authoritative session/user and require exact JSON equality; do not delete the row on authorization-state mismatch.
-7. Serialize the opaque `session.token` using Better Call's signed-cookie serializer and inject it under `ctx.context.authCookies.sessionToken.name` with Better Auth's `setRequestCookie`.
-8. Populate `ctx.context.session` and continue the native pipeline.
+
+Any failure in steps 2–6 removes the SCJWT and the native session cookies from the request, records the request as signed out for the session finalizer, and continues. Storage errors propagate as server errors. On success:
+
+1. Serialize the opaque `session.token` using Better Call's signed-cookie serializer and inject it under `ctx.context.authCookies.sessionToken.name` with Better Auth's `setRequestCookie`.
+2. Populate `ctx.context.session` and continue the native pipeline.
 
 ## Strategy seam: plugin hooks and `newSession`
 
@@ -54,13 +61,17 @@ SCJWT is a universal `hooks.before[]`/`hooks.after[]` plugin with `matcher: () =
 
 For every successful endpoint with `ctx.context.newSession`:
 
-1. Derive the fingerprint from Better Auth `getIP` plus the configured browser inputs.
+1. Derive the fingerprint digests from Better Auth `getIP` (reduced to the configured network) plus the browser headers, keyed with the current signing secret.
 2. Resolve and validate custom claims.
-3. Set `iat` and cap `exp` to `min(session.expiresAt, iat + sessionConfig.expiresIn)`.
+3. Set `iat` and cap `exp` to `min(session.expiresAt, iat + lifetime)`, where `lifetime` is `sessionConfig.expiresIn` for remembered sessions and one day for `rememberMe: false` sessions.
 4. Sign with Better Auth's current secret material.
 5. Replace the live native session-token cookie or emit `set-auth-token`, according to placement.
 
 Returned API errors and non-2xx `Response` values do not receive a replacement token. Better Auth `session.updateAge` is the only refresh policy.
+
+For a request the before hook signed out that establishes no new session, cookie placement expires the SCJWT and Better Auth's session-token, session-data, and `dontRemember` cookies, except any the response already sets (for example the live `dontRemember` marker of a pending two-factor sign-in); header placement emits nothing. The before hook records its outcome per request, keyed by the request's `AuthContext`, which Better Auth shares between a request's before and after hooks.
+
+For a request authenticated under a tolerated device change that establishes no new session, the finalizer re-binds the presented token when the result succeeded, the response neither sets nor clears the session cookie nor carries `set-auth-token`, and `internalAdapter.findSession` still returns the session. The replacement keeps the session ID, `exp`, and `remember`, re-resolves custom claims, and carries digests of the current request; cookie placement sets it as the session cookie (no `Max-Age` for `remember: false`), header placement as `set-auth-token`.
 
 ## Token schema
 
@@ -70,12 +81,15 @@ Required claims:
 {
   "iss": "<resolved Better Auth auth base URL>",
   "sub": "user:<user id>",
-  "fp": "<64 lowercase SHA-256 hex characters>",
+  "fp": { "ip": "<32 hex>", "ua": "<32 hex>", "pf": "<32 hex>" },
   "iat": 0,
   "exp": 0,
-  "sid": "<session row id>"
+  "sid": "<session row id>",
+  "remember": true
 }
 ```
+
+Each `fp` digest is HMAC-SHA-256, keyed with the token's signing secret, over `better-auth-scjwt/fingerprint/v1\0<name>\0<value>` (names `ip`, `ua`, `pf`), truncated to 16 bytes and lowercase-hex encoded. The NUL separators keep these inputs disjoint from JWT signing input, and the truncation means a digest can never stand in for a full HMAC signature (a JWT or a Better Auth signed cookie) under the same secret.
 
 Optional resolver claims are limited to 16 top-level keys, 1024 UTF-8 JSON bytes, and eight nested containers. Registered JWT names and `fp`/`sid` are reserved. Non-finite numbers, non-JSON primitives, cycles, and class instances are rejected.
 
@@ -93,7 +107,7 @@ Cookie placement retains native cache/account cookies. Header placement removes 
 
 ## Runtime compatibility
 
-Fingerprint hashing uses `globalThis.crypto.subtle.digest`. Runtime code has no `node:crypto` dependency and remains compatible with Fetch-based Node, Bun, Deno, Worker, and framework adapter environments supported by Better Auth.
+Fingerprint digests use Web Crypto HMAC (`globalThis.crypto.subtle`). Runtime code has no `node:crypto` dependency and remains compatible with Fetch-based Node, Bun, Deno, Worker, and framework adapter environments supported by Better Auth.
 
 ## Verification gates
 
@@ -108,4 +122,4 @@ bun test
 bun run build
 ```
 
-The build must emit declarations for both package entrypoints. The test suite must prove native `getSession`, cookie/header delivery, effective expiry, callback issuance, refresh and `update-session` re-issuance with a stable `sid`, 2xx-only replacement, dynamic claims, fingerprint rejection without session deletion, storage invariants including secondary-store eviction of a preserved row, and admin revocation. The NestJS example's `test:e2e` profiles prove the same contract over HTTP with Admin, Admin RBAC, i18n, captcha, username, email OTP, and their combination.
+The build must emit declarations for both package entrypoints. The test suite must prove native `getSession`, cookie/header delivery, effective expiry, callback issuance, refresh and `update-session` re-issuance with a stable `sid`, 2xx-only replacement, dynamic claims, fingerprint rejection without session deletion, signed-out handling of invalid tokens, storage invariants including secondary-store eviction of a preserved row, and admin revocation. The NestJS example's `test:e2e` profiles prove the same contract over HTTP with Admin, Admin RBAC, i18n, captcha, username, email OTP, and their combination.

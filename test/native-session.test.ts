@@ -14,9 +14,11 @@ import {
 	TEST_SECRET,
 	createCookieHeaders,
 	createMemoryDB,
+	expectSignedOut,
 	requestSession,
 	rowAt,
 	signUpWithScjwt,
+	type HeaderInput,
 } from "./helpers/native-auth";
 
 const RAW_REDIRECT_STATUSES = [302, 303, 307] as const;
@@ -255,7 +257,7 @@ describe("native Better Auth session transport", () => {
 		await auth.api.signOut({ headers });
 		expect(db.session).toHaveLength(0);
 		const response = await requestSession(auth, headers);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 	});
 
 	test("issues from callback-style newSession", async () => {
@@ -496,7 +498,7 @@ describe("native Better Auth session transport", () => {
 				auth,
 				createCookieHeaders(issued.cookieName, token),
 			);
-			expect(response.status).toBe(401);
+			await expectSignedOut(response);
 		}
 	});
 
@@ -559,7 +561,7 @@ describe("native Better Auth session transport", () => {
 				auth,
 				createCookieHeaders(issued.cookieName, token),
 			);
-			expect(response.status).toBe(401);
+			await expectSignedOut(response);
 		}
 	});
 });
@@ -615,7 +617,7 @@ describe("core Better Auth revocation paths", () => {
 				auth,
 				createCookieHeaders(first.cookieName, token),
 			);
-			expect(response.status).toBe(401);
+			await expectSignedOut(response);
 		}
 	});
 
@@ -663,7 +665,7 @@ describe("core Better Auth revocation paths", () => {
 			auth,
 			createCookieHeaders(issued.cookieName, issued.token),
 		);
-		expect(response.status).toBe(401);
+		await expectSignedOut(response);
 		expect((await signIn(auth, email)).status).toBe(401);
 		expect((await signIn(auth, email, `${PASSWORD}-reset`)).status).toBe(200);
 	});
@@ -746,13 +748,13 @@ describe("HTTP transport boundaries", () => {
 		expect(await (await requestSession(auth, nativeOnly)).json()).toBeNull();
 		const headers = createCookieHeaders(issued.cookieName, nativeCookie);
 		headers.set("authorization", "Bearer not.a.jwt");
-		expect((await requestSession(auth, headers)).status).toBe(401);
+		await expectSignedOut(await requestSession(auth, headers));
 
 		const cookieAuth = createAuth("cookie");
 		const cookieIssued = await signUpWithScjwt(cookieAuth, "no-fallback-cookie@example.com");
 		const cookieHeaders = createCookieHeaders(cookieIssued.cookieName, "not.a.jwt");
 		cookieHeaders.set("authorization", `Bearer ${cookieIssued.token}`);
-		expect((await requestSession(cookieAuth, cookieHeaders)).status).toBe(401);
+		await expectSignedOut(await requestSession(cookieAuth, cookieHeaders));
 	});
 
 	test("parses only the Bearer scheme and treats empty credentials as missing", async () => {
@@ -769,7 +771,193 @@ describe("HTTP transport boundaries", () => {
 			expect(response.status).toBe(200);
 			expect(await response.json()).toBeNull();
 		}
-		expect((await withAuthorization("Bearer a.b")).status).toBe(401);
+		await expectSignedOut(await withAuthorization("Bearer a.b"));
+	});
+});
+
+describe("invalid SCJWTs are signed out", () => {
+	const PASSWORD = "correct-horse-battery-staple";
+	const PLACEMENTS = ["cookie", "header"] as const;
+	const OTHER_DEVICE = { "user-agent": "another-browser", "sec-ch-ua-platform": '"Windows"' };
+	type Placement = (typeof PLACEMENTS)[number];
+
+	function createAuth(tokenPlacement: Placement, db = createMemoryDB()) {
+		return betterAuth({
+			database: memoryAdapter(db),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [scjwt({ tokenPlacement })],
+		});
+	}
+	type Auth = ReturnType<typeof createAuth>;
+
+	/** Presents `token` in `tokenPlacement` from the given device. */
+	function present(
+		tokenPlacement: Placement,
+		cookieName: string,
+		token: string,
+		device: HeaderInput = STABLE_HEADERS,
+	): Headers {
+		if (tokenPlacement === "cookie") {
+			return createCookieHeaders(cookieName, token, device);
+		}
+		const headers = new Headers(device);
+		headers.set("authorization", `Bearer ${token}`);
+		return headers;
+	}
+
+	function post(auth: Auth, path: string, headers: Headers, body: object = {}) {
+		const request = withOrigin(headers);
+		request.set("content-type", "application/json");
+		return auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth${path}`, {
+				method: "POST",
+				headers: request,
+				body: JSON.stringify(body),
+			}),
+		);
+	}
+
+	/** The SCJWT a response delivered in `tokenPlacement`, or `null`. */
+	function issuedToken(
+		response: Response,
+		tokenPlacement: Placement,
+		cookieName: string,
+	): string | null {
+		if (tokenPlacement === "header") {
+			return response.headers.get("set-auth-token");
+		}
+		const value = parseSetCookieHeader(response.headers.get("set-cookie") ?? "").get(
+			cookieName,
+		)?.value;
+		return value || null;
+	}
+
+	/** Whether `response` tells the browser to drop cookie `name`. */
+	function clearsCookie(response: Response, name: string): boolean {
+		const cookie = parseSetCookieHeader(response.headers.get("set-cookie") ?? "").get(name);
+		return cookie?.value === "" && cookie["max-age"] === 0;
+	}
+
+	test("signs in again while presenting a revoked SCJWT", async () => {
+		for (const tokenPlacement of PLACEMENTS) {
+			const db = createMemoryDB();
+			const auth = createAuth(tokenPlacement, db);
+			const email = `${tokenPlacement}-stale-sign-in@example.com`;
+			const issued = await signUpWithScjwt(auth, email);
+			const stale = present(tokenPlacement, issued.cookieName, issued.token);
+			expect((await post(auth, "/revoke-sessions", stale)).status).toBe(200);
+			expect(db.session).toHaveLength(0);
+
+			const signIn = await post(auth, "/sign-in/email", stale, { email, password: PASSWORD });
+			expect(signIn.status).toBe(200);
+			const replacement = issuedToken(signIn, tokenPlacement, issued.cookieName);
+			expect(replacement?.split(".")).toHaveLength(3);
+			const current = await requestSession(
+				auth,
+				present(tokenPlacement, issued.cookieName, replacement ?? ""),
+			);
+			expect(await current.json()).toMatchObject({ user: { email } });
+		}
+	});
+
+	test("a mismatched device signs out without ending the session", async () => {
+		for (const tokenPlacement of PLACEMENTS) {
+			const db = createMemoryDB();
+			const auth = createAuth(tokenPlacement, db);
+			const email = `${tokenPlacement}-foreign-sign-out@example.com`;
+			const issued = await signUpWithScjwt(auth, email);
+			const response = await post(
+				auth,
+				"/sign-out",
+				present(tokenPlacement, issued.cookieName, issued.token, OTHER_DEVICE),
+			);
+			expect(response.status).toBe(200);
+			expect(response.headers.get("set-auth-token")).toBeNull();
+			if (tokenPlacement === "cookie") {
+				expect(clearsCookie(response, issued.cookieName)).toBe(true);
+			}
+			expect(db.session).toHaveLength(1);
+			const original = await requestSession(
+				auth,
+				present(tokenPlacement, issued.cookieName, issued.token),
+			);
+			expect(await original.json()).toMatchObject({ user: { email } });
+		}
+	});
+
+	test("reads drop a rejected SCJWT: cookie placement clears it, header placement emits nothing", async () => {
+		for (const tokenPlacement of PLACEMENTS) {
+			const auth = createAuth(tokenPlacement);
+			const issued = await signUpWithScjwt(auth, `${tokenPlacement}-rejected-read@example.com`);
+			const response = await requestSession(
+				auth,
+				present(tokenPlacement, issued.cookieName, issued.token, OTHER_DEVICE),
+			);
+			expect(response.headers.get("set-auth-token")).toBeNull();
+			if (tokenPlacement === "cookie") {
+				expect(clearsCookie(response, issued.cookieName)).toBe(true);
+			} else {
+				expect(response.headers.get("set-cookie")).toBeNull();
+			}
+			await expectSignedOut(response);
+		}
+	});
+
+	test("session-required endpoints still answer 401, even next to a valid native cookie", async () => {
+		for (const tokenPlacement of PLACEMENTS) {
+			const db = createMemoryDB();
+			const auth = createAuth(tokenPlacement, db);
+			const issued = await signUpWithScjwt(auth, `${tokenPlacement}-protected@example.com`);
+			const headers = present(tokenPlacement, issued.cookieName, issued.token, OTHER_DEVICE);
+			if (tokenPlacement === "header") {
+				const context = await auth.$context;
+				const nativeCookie = decodeURIComponent(
+					(await serializeSignedCookie("", rowAt(db.session).token, context.secret)).replace(
+						"=",
+						"",
+					),
+				);
+				headers.set("cookie", `${issued.cookieName}=${encodeURIComponent(nativeCookie)}`);
+			}
+			const response = await auth.handler(
+				new Request(`${TEST_BASE_URL}/api/auth/list-sessions`, { headers }),
+			);
+			expect(response.status).toBe(401);
+		}
+	});
+
+	test("header placement removes a rejected Bearer token from the endpoint's request headers", async () => {
+		const seen: Array<string | null> = [];
+		const echo = {
+			id: "authorization-echo",
+			endpoints: {
+				echoAuthorization: createAuthEndpoint(
+					"/echo-authorization",
+					{ method: "GET" },
+					async (ctx) => {
+						seen.push(ctx.headers?.get("authorization") || null);
+						return ctx.json({ ok: true });
+					},
+				),
+			},
+		} satisfies BetterAuthPlugin;
+		const auth = betterAuth({
+			database: memoryAdapter(createMemoryDB()),
+			baseURL: TEST_BASE_URL,
+			secret: TEST_SECRET,
+			emailAndPassword: { enabled: true },
+			plugins: [scjwt({ tokenPlacement: "header" }), echo],
+		});
+		const issued = await signUpWithScjwt(auth, "rejected-bearer@example.com");
+		const rejected = present("header", issued.cookieName, issued.token, OTHER_DEVICE);
+		const response = await auth.handler(
+			new Request(`${TEST_BASE_URL}/api/auth/echo-authorization`, { headers: rejected }),
+		);
+		expect(response.status).toBe(200);
+		await auth.api.echoAuthorization({ headers: rejected });
+		expect(seen).toEqual([null, null]);
 	});
 });
 

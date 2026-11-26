@@ -5,7 +5,7 @@ Framework examples exercise `better-auth-scjwt` through production-style applica
 ## NestJS
 
 `examples/nestjs` is a Bun-run NestJS application generated with the Nest CLI. It uses the community-maintained `@thallesp/nestjs-better-auth` Express integration, Better Auth 1.7.18's Bun-native SQLite support, email/password authentication, and the local `better-auth-scjwt` package. Nest body parsing is disabled at application creation so the Better Auth integration can consume auth request bodies correctly.
-The app registers a narrow Nest exception filter for Better Auth `APIError` values so invalid or revoked SCJWTs encountered by the integration's global guard retain their `401` status instead of becoming generic server errors.
+An invalid, expired, or revoked SCJWT leaves the request signed out, so the integration's global guard answers `401` through Nest's own `UnauthorizedException`; no exception filter is needed.
 The example consumes the root package through `file:../..`. Its `build`, `test`, `test:e2e`, `typecheck`, `auth:migrate`, and `start:dev` scripts first run `sync:scjwt`, which rebuilds the root `dist` and refreshes the local copy with `bun install --frozen-lockfile --ignore-scripts --force`, so they never load a missing or stale `dist` and a refresh can neither rerun lifecycle scripts nor change locked dependency versions.
 
 The only application-owned routes are:
@@ -17,8 +17,8 @@ Better Auth owns the `/api/auth/*` routes.
 
 ### Source layout
 
-- `src/auth.factory.ts` — import-safe `createAuth(...)`: opens the SQLite file, enables email/password, and registers `[scjwt(), ...additionalPlugins]`. SCJWT is always first so session-dependent plugin hooks see the SCJWT-resolved session.
-- `src/auth.ts` — the production singleton: reads `BETTER_AUTH_DATABASE`, `BETTER_AUTH_URL`, and `BETTER_AUTH_SECRET` and calls the factory with no additional plugins. The runnable application is SCJWT-only.
+- `src/auth.factory.ts` — import-safe `createAuth(...)`: opens the SQLite file, enables email/password, and registers `[scjwt(options.scjwt), ...additionalPlugins]`; profiles may also pass Better Auth `advanced` settings. SCJWT is always first so session-dependent plugin hooks see the SCJWT-resolved session.
+- `src/auth.ts` — the production singleton: reads `BETTER_AUTH_DATABASE`, `BETTER_AUTH_URL`, and `BETTER_AUTH_SECRET` and calls the factory with no additional plugins and default SCJWT options (cookie placement, strict fingerprints). The runnable application is SCJWT-only.
 - `src/app-module.metadata.ts` — module wiring shared by `AppModule` and the E2E profiles.
 
 ### E2E profiles
@@ -27,7 +27,7 @@ Each profile file builds its own Better Auth instance through the factory, a uni
 
 | Profile | Plugins after `scjwt()` | Proves |
 |---|---|---|
-| `scjwt-only` | none | Sign-up/in, session lookup/listing, targeted and session-wide revocation, password change, sign-out, invalid credentials and SCJWTs |
+| `scjwt-only` | none | Sign-up/in, session lookup/listing, targeted and session-wide revocation, password change, sign-out, invalid credentials and SCJWTs, and recovery from a revoked SCJWT still held in the cookie jar (signed-out read clears it; sign-in succeeds) |
 | `admin` | `admin()` | Denial for anonymous/ordinary users, user CRUD, roles, ban/unban, session revocation, impersonation with `admin_session` restoration, password set, user removal |
 | `rbac` | `admin({ ac, roles })` | Custom `project` statement, `auditor` role, `has-permission`, role changes observed by existing SCJWTs without new sessions |
 | `i18n` | `i18n()` | Header/cookie/stored-user locale detection on translated errors |
@@ -36,6 +36,7 @@ Each profile file builds its own Better Auth instance through the factory, a uni
 | `email-otp` | `emailOTP()` | OTP sign-in/auto-registration, attempts, replay, expiry, resend strategies, verification, password reset revocation, two-stage email change |
 | `combined-plugins` | `admin`, `captcha`, `username`, `emailOTP`, `i18n` | All of the above composed in one application |
 | `two-factor` | `twoFactor({ otpOptions })`, `username`, `admin` | OTP enrollment and disabling rotate the session; password and username sign-in stop at the challenge with no live session cookie; wrong and expired codes and a replayed challenge issue nothing; the verified session is a normal SCJWT session visible to Admin and ended by sign-out |
+| `fingerprint` | none; `scjwt({ fingerprint: { mode } })` per case | `strict`: a changed User-Agent answers `401` on `/me`, a signed-out read clears the cookie, and signing in again recovers; `dynamic`: a same-`/24` address keeps the token, another network re-binds it with the same `sid` (delivered on the next Better Auth response, not by the guard), and a network plus User-Agent change signs out; `loose`: every change re-binds |
 
 The `two-factor` profile covers the OTP method only, with codes captured in memory by `sendOTP`. TOTP, backup codes, trusted devices, passkeys, and OAuth-provider MFA are not exercised. Header placement during a pending challenge is covered by the root suite (`test/lifecycle-finalization.test.ts`), where the challenge cookie is the only cookie the client must return.
 
